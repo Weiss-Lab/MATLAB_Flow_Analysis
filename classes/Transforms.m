@@ -31,17 +31,33 @@ classdef Transforms < handle
 		
 		MEF_CONVERSION_FACTOR = 2e3;
 		
+		% Unique names - has error when you select more peaks than the one w/
+		% the least number of peaks!
+% 		CHANNEL_MAP = struct( ...
+% 			'BUV_396_A',		'MECSB', ...	% Not exactly right but the closest one
+% 			'Cascade_Blue_A',	'MECSB', ...
+% 			'Pacific_Blue_A',	'MEBFP', ...
+% 			'FITC_A',			'MEFL', ...
+% 			'PE_A',				'MEPE', ...
+%			'PE_YG_A'			'MEPE', ...		% Alt name for Koch LSRII-HTS2
+% 			'PE_Texas_Red_A',	'MEPTR', ...
+% 			'PE_TxRed_YG_A',	'MEPTR', ...	% Alt name for Koch LSRII-HTS2
+% 			'PE_Cy5_5_A',		'MECY', ...
+% 			'PE_Cy7_A',			'MEPCY7', ...
+% 			'APC_A',			'MEAP', ...
+% 			'APC_Cy7_A',		'MEAPCY7');
+		
+		% All MEFLs - ignore peak # error, calculation should come out the same
 		CHANNEL_MAP = struct( ...
-			'Cascade_Blue_A',	'MEVSB', ...
-			'Pacific_Blue_A',	'MEBFP', ...
+			'BUV_396_A',		'MEFL', ...
+			'Pacific_Blue_A',	'MEFL', ...
 			'FITC_A',			'MEFL', ...
-			'PE_A',				'MEPE', ...
-			'PE_Texas_Red_A',	'MEPTR', ...
-			'PE_TxRed_YG_A',	'MEPTR', ...	% Alt name for Koch LSRII-HTS2
-			'PE_Cy5_5_A',		'MECY', ...
-			'PE_Cy7_A',			'MEPCY7', ...
-			'APC_A',			'MEAP', ...
-			'APC_Cy7_A',		'MEAPCY7');
+			'PE_A',				'MEFL', ...
+			'PE_YG_A',			'MEFL', ...		% Alt name for Koch LSRII-HTS2
+			'PE_Texas_Red_A',	'MEFL', ...
+			'PE_TxRed_YG_A',	'MEFL', ...		% Alt name for Koch LSRII-HTS2
+			'APC_A',			'MEFL', ...
+			'APC_Cy7_A',		'MEFL');
 		
 		BEAD_TYPES = {'RCP-30-5A'};
 		
@@ -319,7 +335,10 @@ classdef Transforms < handle
 			for i = 1:numel(channels)
 				requestedUnits{i} = Transforms.CHANNEL_MAP.(channels{i}); 
 			end
-
+			
+			if numel(unique(requestedUnits)) < numel(channels)
+				warning('Non-unique bead units detected - be sure to check channel names')
+			end
 		end
 		
 		
@@ -517,6 +536,12 @@ classdef Transforms < handle
             % Check inputs, initialize data struct
             [beadData, beadVals] = zCheckInputs_calMEF();
 			MEF_units = fieldnames(beadVals)'; % Start in same order as channels
+			if (numel(MEF_units) == 1 && numel(channels) > 1)
+				warning('Adjusting %s units to match all channels', MEF_units{1});
+				MEF_units = repmat(MEF_units, 1, numel(channels));
+			elseif (numel(MEF_units) < numel(channels))
+				error('Number of bead units does not match number of channels!')
+			end
 			
 			% Find max number of peaks to look for
 			% --> Some channels only have beads above a certain fluorescence
@@ -542,22 +567,23 @@ classdef Transforms < handle
 			thresh = 8;
 			filteredMeans = filterMeans(means, counts, centers, thresh);
 			
-			numPeaks = size(filteredMeans, 1) - 1;			
+			numPeaks = size(filteredMeans, 1) - 1;	
 			res_min = inf;
 			opt = optimoptions('lsqcurvefit', 'Display', 'off');
-			for highestPeak = 1 : (MAX_PEAKS - numPeaks + 1)
+			for hpi = 1 : (MAX_PEAKS - numPeaks + 1)
 				% Its a bit simpler to index peaks from the highest down,
 				% since all beads have the largest populations, but some
 				% don't have smaller ones. By flipping so that low indexes 
 				% are high beads and vice-versa, we don't have to adjust 
-				% the index for each bead population up or down. 
+				% the index for each bead population up or down.
+				% --> hpi := highestPeakIndex
 				
-				highestPeak_true = BEAD_PEAKS - highestPeak + 1;
-				fprintf(1, 'Trying highest peak: %d\n', highestPeak_true);
+				highestPeak = BEAD_PEAKS - hpi + 1;
+				fprintf(1, 'Trying highest peak: %d\n', highestPeak);
 				
 				% Iterate over each channel and add up residuals
 				% Reset rolling parameters each time for cleanliness
-				ress = zeros(1, numel(channels));
+				res_all = zeros(1, numel(channels));
 				fits = zeros(2, numel(channels));
 				for chID = 1:numel(channels)
 
@@ -565,7 +591,7 @@ classdef Transforms < handle
 					MEF = flipud(beadVals.(MEF_units{chID})');
 
 					% Identify which bead pops to query
-					beadPops = highestPeak : (highestPeak + numPeaks - 1);
+					beadPops = hpi : (hpi + numPeaks - 1);
 					pointsMean = filteredMeans(2:end, chID); % Means already log10 transf
 					pointsMEF = flipud(log10(MEF(beadPops)));
 % 						pointsMEF = flipud((MEF(beadPops)));
@@ -579,27 +605,27 @@ classdef Transforms < handle
 						fit = lsqcurvefit(@(p, x) linearFunc([1; p(2)], x), [1; 1], pointsMean, pointsMEF, [], [], opt);
 					end
 					fits(:, chID) = reshape(fit, [], 1);
-
+					
 					% Measure and collate residuals
 					yResid = abs(pointsMEF - polyval(fitNL, pointsMean));
 					ssResid = sum(yResid.^2);
 					ssTotal = (length(pointsMEF) - 1) * var(pointsMEF);
-					ress(chID) = ssResid / ssTotal;
+					res_all(chID) = ssResid / ssTotal;
 				end
-				res = min(ress);
+				res = min(res_all);
 
 				fprintf(1, 'Residuals: %.3f\n', res);
 				
 				% Determine if this is the best fit
-				if ismember(sprintf('peak_%d', highestPeak_true), options)
+				if ismember(sprintf('peak_%d', highestPeak), options)
 					res = -inf;
-					fprintf(1, 'Forcing Peak %d to be highest\n', highestPeak_true);
+					fprintf(1, 'Forcing Peak %d to be highest\n', highestPeak);
 				end
 				if (res < res_min)
 					res_min = res;
-					ress_min = ress;
+					res_all_min = res_all;
 					numPeaks_min = numPeaks;
-					highestPeak_min = BEAD_PEAKS - highestPeak + 1;
+					highestPeak_min = BEAD_PEAKS - hpi + 1;
 					beadPops_min = BEAD_PEAKS - beadPops + 1;
 					fits_min = fits;
 					means_min = 10.^filteredMeans(2:end, :);
@@ -608,15 +634,15 @@ classdef Transforms < handle
 			end
 			
 			% Extract finalized value
-			rsq			= 1 - ress_min;
+			rsq			= 1 - res_all_min;
 			numPeaks	= numPeaks_min;
-			highestPeak = highestPeak_min;
+			hpi = highestPeak_min;
 			beadPops	= beadPops_min;
 			fits		= fits_min;
 			meansLin	= means_min;
 			meansBxp	= Transforms.lin2logicle(meansLin);
 			
-			fprintf(1, '\nFinished fitting! # Peaks = %d, Highest = Peak #%d\n', numPeaks, highestPeak);
+			fprintf(1, '\nFinished fitting! # Peaks = %d, Highest = Peak #%d\n', numPeaks, hpi);
 			
 			% Show final calibration plots if requested
 			if ismember('showPlots', options)
@@ -920,8 +946,8 @@ classdef Transforms < handle
 						ax.XScale = 'log';
 						title(sprintf('Scale Factor: %.2f | R^2: %.3f', ...
 								slope, rsq), 'fontsize', 14)
-						ylabel('MEFL')
-						xlabel(currChanMEF);
+						ylabel('FITC_A (MEFL)')
+						xlabel(sprintf('%s (%s)', strrep(channels{chID}, '_', '-'), currChanMEF));
 					end
 				end
 			end

@@ -76,7 +76,9 @@ classdef FlowData < handle
 		cytometer = '';				% Experiment cytometer used
 		
 		numSamples = 0;				% The number of data samples
+		numControls = 0;			% The number of controls
 		numCells = [];				% The number of cells in each sample
+		numCellsControls = [];		% The number of cells in each control
 		sampleData = struct();		% Sample fluorescence and gate data in standard struct
 		sampleMap = table();		% Experimental information for samples
 		
@@ -101,8 +103,6 @@ classdef FlowData < handle
 		binInputs = struct();		% Struct w/ bin channels as fields and edges as values
 		binDataType = '';			% Binned dataType ('raw', 'mComp', 'mefl', etc)
 		
-		unnamedOps = 0;				% # Of operate() calls with no newDataType input
-		
 		logicleParams = struct( ... % Logicle transformation parameters to use
 			'T', 2^18, ...
 			'M', 4.5, ...
@@ -122,6 +122,8 @@ classdef FlowData < handle
 		compensated = false;			% Tracks if compensation has been performed
 		meflConverted = false;			% Tracks if mefl conversion has been performed
 		binned = false;					% Tracks if binning has been performed
+		
+		unnamedOps = 0;					% # Of operate() calls with no newDataType input
 	end
 	
 	
@@ -131,20 +133,21 @@ classdef FlowData < handle
 				'Pacific_Blue_A', 'B', ...
 				'FITC_A', 'Y', ...
 				'PE_A', 'O', ...
+				'PE_YG_A', 'O', ...			% Koch LSRII-HTS2 Name
 				'PE_Texas_Red_A', 'R', ...
-				'PE_TxRed_YG_A', 'R', ...
+				'PE_TxRed_YG_A', 'R', ...	% Koch LSRII-HTS2 Name
 				'APC_Cy7_A', 'I');
 	end
 	
 	
 	methods (Access = public)
 		
-		function self = FlowData(dataFnames, channels, exptDetails)
+		function self = FlowData(dataFnames, channels, expDetails)
 			% Initializes the FlowData object 
 			% by importing data from the given files, which should correspond
 			% with the given sample map and contain data in the given channels.
 			%
-			%	self = FlowData(dataFilenames, channels, sampleMap)
+			%	self = FlowData(dataFnames, channels, expDetails)
 			%
 			%	Inputs
 			%		dataFnames		<cell, char> Data filenames to import
@@ -158,7 +161,7 @@ classdef FlowData < handle
 			%						**Must be a field of dataStruct
 			%						**FSC/SSC are automatically taken
 			%
-			%		exptDetails		<struct> A struct with the following fields
+			%		expDetails		<struct> A struct with the following fields
 			%						recording experimental details:
 			%							name		|	<char>
 			%							date		|	<char>
@@ -179,40 +182,50 @@ classdef FlowData < handle
 			[dataStruct, sampleMapFname] = zCheckInputs(self);
 			
 			% Extract experiment details
-			self.date = exptDetails.date;
-			self.name = exptDetails.name;
-			self.folder = exptDetails.folder;
-			self.cytometer = exptDetails.cytometer;
+			self.date = expDetails.date;
+			self.name = expDetails.name;
+			self.folder = expDetails.folder;
+			self.cytometer = expDetails.cytometer;
+			
+			% Defaults
+			numReplicates = 1;
+			IDs = 1:numel(dataStruct);
 			
 			% Extract sample map
-			sampleMap = readtable(sampleMapFname, 'delimiter', '\t');
-			assert(height(sampleMap) == numel(dataStruct), ...
-				'Sample map (%d) contains incorrect number of rows (%d)', ...
-				height(sampleMap), numel(dataStruct))
-			if ismember('Replicate', sampleMap.Properties.VariableNames)
-				numReplicates = max(sampleMap.Replicate);
-				IDs = zeros(numReplicates, height(sampleMap) / numReplicates);
-				for r = 1:numReplicates
-					IDs(r, :) = find(sampleMap.Replicate == r);
+			if ~isempty(sampleMapFname)
+				try % Don't want to throw away loaded data
+					sampleMap = readtable(sampleMapFname, 'delimiter', '\t');
+					assert(height(sampleMap) == numel(dataStruct), ...
+						'Sample map (%d) contains incorrect number of rows (%d)', ...
+						height(sampleMap), numel(dataStruct))
+					
+					% "Replicate" column allows data to be automatically combined
+					if ismember('Replicate', sampleMap.Properties.VariableNames)
+						% Overwrite numReplicates and IDs based on data condensation 
+						numReplicates = max(sampleMap.Replicate);
+						IDs = zeros(numReplicates, height(sampleMap) / numReplicates);
+						for r = 1:numReplicates
+							IDs(r, :) = find(sampleMap.Replicate == r);
+						end
+						% Wean sampleMap to only be have one replicate
+						sampleMap = sampleMap(sampleMap.Replicate == 1, :);
+					end
+					self.sampleMap = sampleMap;
+				catch ME
+					warning('Error occured while reading sample map, skipping...')
+					disp(ME)
 				end
-				% Wean sampleMap to only be have one replicate
-				sampleMap = sampleMap(sampleMap.Replicate == 1, :);
-			else
-				numReplicates = 1;
-				IDs = 1:height(sampleMap);
 			end
-			self.sampleMap = sampleMap;
 			
 			% Extract data from the given channels
-			self.numSamples = height(sampleMap);
+			self.numSamples = size(IDs, 2);
 			self.numCells = zeros(1, self.numSamples);
-			for i = 1:numel(IDs)
+			for i = 1:size(IDs, 2)
 				
-				ID = IDs(i);
 				nObs = 0;
 				
 				for r = 1:numReplicates
-					nObs = nObs + dataStruct(ID(r)).nObs;
+					nObs = nObs + dataStruct(IDs(r, i)).nObs;
 				end
 				self.numCells(i) = nObs;
 				
@@ -220,7 +233,7 @@ classdef FlowData < handle
 				for ch = channels
 					sd = [];
 					for r = 1:numReplicates
-						sd = [sd; dataStruct(ID(r)).(ch{:}).raw];
+						sd = [sd; dataStruct(IDs(r, i)).(ch{:}).raw];
 					end
 					self.sampleData(i).(ch{:}).raw = sd;
 				end
@@ -230,7 +243,7 @@ classdef FlowData < handle
 				for ch = Gating.SCATTER_CHANNELS
 					sds = [];
 					for r = 1:numReplicates
-						sds = [sds; dataStruct(ID(r)).(ch{:}).raw];
+						sds = [sds; dataStruct(IDs(r, i)).(ch{:}).raw];
 					end
 					self.sampleDataScatter(i).(ch{:}).raw = sds;
 				end
@@ -252,28 +265,33 @@ classdef FlowData < handle
 			function [dataStruct, sampleMapFname] = zCheckInputs(self)
 				validateattributes(dataFnames, {'cell', 'char'}, {}, mfilename, 'dataFilenames', 1);
 				validateattributes(channels, {'cell', 'char'}, {}, mfilename, 'channels', 2);
-				validateattributes(exptDetails, {'struct'}, {}, mfilename, 'exptDetails', 3);
+				validateattributes(expDetails, {'struct'}, {}, mfilename, 'exptDetails', 3);
 				
 				% Convert channels to cell array if single char value is given
 				if ischar(channels), channels = {channels}; end
 				channels = reshape(channels, 1, []); % Ensure row vector
 				
 				% Check required experiment details are present
-				requiredFields = {'date', 'name', 'folder', 'sampleMap', 'cytometer'};
-				missingFields = setdiff(requiredFields, fieldnames(exptDetails));
+				requiredFields = {'date', 'name', 'folder', 'cytometer'};
+				missingFields = setdiff(requiredFields, fieldnames(expDetails));
 				assert(isempty(missingFields), 'Experiment details missing field: %s\n', missingFields{:});
-				assert(logical(exist(exptDetails.folder, 'file')), 'Experiment folder does not exist!');
-				if ~(exptDetails.folder(end) == filesep)
-					exptDetails.folder = [exptDetails.folder, filesep];
+				assert(logical(exist(expDetails.folder, 'file')), 'Experiment folder does not exist!');
+				if ~(expDetails.folder(end) == filesep)
+					expDetails.folder = [expDetails.folder, filesep];
 				end
 				
 				% Check sampleMap is a real file
-				sampleMapFname = self.convertToFullFile(exptDetails.sampleMap, exptDetails.folder);
-				assert(logical(exist(sampleMapFname, 'file')), ...
-					'File not found: %s\n', sampleMapFname)
+				if isfield(expDetails, 'sampleMap')
+					sampleMapFname = self.convertToFullFile(expDetails.sampleMap, expDetails.folder);
+					if ~logical(exist(sampleMapFname, 'file'))
+						warning('Sample map not found: %s, skipping...', sampleMapFname)
+					end
+				else
+					sampleMapFname = [];
+				end
 				
 				% Get data filenames
-				dataFnames = self.convertToFullFile(dataFnames, exptDetails.folder);
+				dataFnames = self.convertToFullFile(dataFnames, expDetails.folder);
 				ds = FlowAnalysis.openFiles(dataFnames{1});
 				
 				% Check channels are present in dataStruct
@@ -282,12 +300,16 @@ classdef FlowData < handle
 					'Channel not in dataStruct: %s\n', badChannels{:});
 				
 				% Import all data
-				dataStruct = FlowAnalysis.openFiles(dataFnames{:});
+				if (numel(dataFnames) > 1)
+					dataStruct = [ds, FlowAnalysis.openFiles(dataFnames{2:end})];
+				else
+					dataStruct = ds;
+				end
 			end
 		end
 		
 		
-		function addControls(self, controlFolder, wildTypeFname, singleColorFnames, twoColorFnames)
+		function self = addControls(self, controlFolder, wildTypeFname, singleColorFnames, twoColorFnames)
 			% Adds wild-type, single-color, and two-color (optional) data to the dataset
 			% so that we can do compensation (single-colors) and MEFL conversion (two-colors).
 			%
@@ -324,6 +346,15 @@ classdef FlowData < handle
 			% Extract scatter data
 			self.controlDataScatter = extractData([Gating.SCATTER_CHANNELS, {'nObs'}], ...
 						wildTypeData, singleColorData, twoColorData, FITC_IDX);
+			
+			% Find number of cells per control
+			self.numControls = numel(self.controlData);
+			self.numCellsControls = zeros(self.numControls, 1);
+			for ci = 1:self.numControls
+				nc = self.controlData.nObs;
+				if isempty(nc), nc = 0; end
+				self.numCellsControls = nc;
+			end
 			
 			self.controlsAdded = true;
 			fprintf(1, 'Finished adding controls\n');
@@ -405,7 +436,7 @@ classdef FlowData < handle
 		end
 		
 		
-		function gate(self, onlyP1)
+		function self = gate(self, onlyP1)
 			% Creates gates for the data using standard gating (see Gating.m)
 			%
 			%	self.gate(onlyP1)
@@ -420,45 +451,47 @@ classdef FlowData < handle
 			assert(self.controlsAdded, 'Controls must be added before gating!\n');
 			
 			% Determine gating options
-			onlyP1 = (~exist('onlyP1', 'var') || all(logical(onlyP1)));
+			onlyP1 = (exist('onlyP1', 'var') && all(logical(onlyP1)));
 			self.onlyP1 = onlyP1;
 			if strcmpi(self.cytometer, 'Koch-LSRII-HTS2'), swap = true; else, swap = false; end
 			
 			% Setup new directories for gates
-			gateDirSamples = [self.folder, 'Gating', filesep];
-			if ~exist(gateDirSamples, 'file')
-				mkdir(gateDirSamples)
-			end
 			gateDirControls = [self.controlFolder, 'Gating', filesep];
 			if ~exist(gateDirControls, 'file')
 				mkdir(gateDirControls)
+			end
+			gateDirSamples = [self.folder, 'Gating', filesep];
+			if ~exist(gateDirSamples, 'file')
+				mkdir(gateDirSamples)
 			end
 			
 			% Check if gates have already been made for this data first, then
 			% process if necessary. 
 			gatesSaveName = [self.date, '_', self.name];
-			gatesFnameSamples = [gateDirSamples, gatesSaveName '_GatePolygons.mat'];
+			
 			gatesFnameControls = [gateDirControls, 'Controls_GatePolygons.mat'];
-			if exist(gatesFnameSamples, 'file')
-				% Load existing sample gates
-				load(gatesFnameSamples);
-			else
-				% Do manual sample gating
-				[gateP1s, gateP2s, gateP3s, gateFigs] = Gating.standardGating(self.sampleDataScatter, onlyP1, swap);
-				save(gatesFnameSamples, 'gateP1s', 'gateP2s', 'gateP3s');
-				for f = fieldnames(gateFigs)
-					saveas(gateFigs.(f{:}), [gateDirSamples, gatesSaveName, '_gate', f{:}, 's']);
-				end
-			end
 			if exist(gatesFnameControls, 'file')
 				% Load existing control gates
-				load(gatesFnameControls);
+				load(gatesFnameControls, 'gateP1c', 'gateP2c', 'gateP3c');
 			else
 				% Do manual control gating
 				[gateP1c, gateP2c, gateP3c, gateFigs] = Gating.standardGating(self.controlDataScatter, onlyP1, swap);
 				save(gatesFnameControls, 'gateP1c', 'gateP2c', 'gateP3c');
-				for f = fieldnames(gateFigs)
+				for f = fieldnames(gateFigs)'
 					saveas(gateFigs.(f{:}), [gateDirControls, 'Controls_gate', f{:}, 'c']);
+				end
+			end
+			
+			gatesFnameSamples = [gateDirSamples, gatesSaveName '_GatePolygons.mat'];
+			if exist(gatesFnameSamples, 'file')
+				% Load existing sample gates
+				load(gatesFnameSamples, 'gateP1s', 'gateP2s', 'gateP3s');
+			else
+				% Do manual sample gating
+				[gateP1s, gateP2s, gateP3s, gateFigs] = Gating.standardGating(self.sampleDataScatter, onlyP1, swap);
+				save(gatesFnameSamples, 'gateP1s', 'gateP2s', 'gateP3s');
+				for f = fieldnames(gateFigs)'
+					saveas(gateFigs.(f{:}), [gateDirSamples, gatesSaveName, '_gate', f{:}, 's']);
 				end
 			end
 			
@@ -475,8 +508,8 @@ classdef FlowData < handle
 			self.controlDataScatter = Gating.applyStandardGates(self.controlDataScatter, gateP1c, gateP2c, gateP3c, swap);
 			self.sampleDataScatter	= Gating.applyStandardGates(self.sampleDataScatter,  gateP1s, gateP2s, gateP3s, swap);
 			
-			% Transfer gate logicals to extrenally accesible data
-			for cd = 1:numel(self.controlData)
+			% Transfer gate logicals to externally accesible data
+			for cd = 1:self.numControls
 				self.controlData(cd).gates = self.controlDataScatter(cd).gates;
 			end
 			for sd = 1:self.numSamples
@@ -487,7 +520,120 @@ classdef FlowData < handle
 		end
 		
 		
-		function convertToMEF(self, beadsControls, beadsSamples, options)
+		function self = customGate(self, gateName, sampleIDs, sliceParams, axScale)
+			% Creates a custom gate using data from the given samples 
+			% and the given slice parameters.
+			%
+			%	self.customGate(gateName, sampleIDs, sliceParams)
+			%
+			%	Inputs
+			%
+			%		gateName		<char> The name of the new gate
+			%
+			%		sampleIDs		<integer> The sample(s) to slice as given by
+			%						the numerical sample ID(s).
+			%							(Optional, defaults to all cells)
+			%
+			%		sliceParams		<struct> Optional, struct with optional fields:
+			%						'channels':  <cell, char>, defaults to self.channels
+			%									 (Only first 2 channels are used)
+			%						'dataType':  <char>, defaults to 'raw'
+			%						'gate':		 <char>, defaults to no gate
+			%						'equalize':  <logical>, TRUE returns an equal
+			%									 number of points from each sample
+			%									 (default = FALSE), operation
+			%									 performed before applying bins
+			%						'numPoints': The number of cells to extract
+			%									 per sample (if the minimum number 
+			%									 of cells per sample is lower, the 
+			%									 method will use that value). 
+			%						'controls':  <logical> TRUE slices from
+			%									 controlData rather than sampleData
+			%									 (default = FALSE)
+			%						'bins':		 <numeric> defaults to all cells
+			%									 An Nx1 set of numerical bin IDs or an 
+			%									 NxD set of bin coordinates where D = #
+			%									 of bin channels. 
+			%									 Automatically forces 'dataType' to be 
+			%									 'self.binDataType' regardless of whether 
+			%									 they are given or not
+			%									 <Can input 'all' to select all bins>
+			%
+			%		axScale			<char> Optional: The axis scaling to use:
+			%							'loglog', 'semilogy', 'semilogx',
+			%							'linear' (default)
+			
+			% Check inputs
+			zCheckInputs_customGate()
+			
+			gateDirSamples = [self.folder, 'Gating', filesep];
+			if ~exist(gateDirSamples, 'file')
+				mkdir(gateDirSamples)
+			end
+			
+			% Extract data and do gating
+			outData = self.slice(sampleIDs, sliceParams);
+			[~, gatePolygon, gateFig] = Gating.gatePolygon( ...
+					outData(:, 1), outData(:, 2), axScale);
+			
+			% Store gate info
+			if (isfield(sliceParams, 'controls') && sliceParams.controls)
+				for ci = 1:self.numControls
+					if isempty(self.controlData(ci).(self.channels{1}))
+						continue % Handle empty tcData
+					end
+					% Extract sample data and gate
+					[outData, sliceGates] = self.slice(ci, sliceParams);
+					inGate = Gating.gatePolygon(outData(:, 1), outData(:, 2), axScale, gatePolygon);
+					
+					% Adjust index based on input gate
+					inGateFixed = Gating.fixGateIdxs(sliceGates{1}, inGate);
+					self.controlData(ci).gates.(gateName) = inGateFixed;
+				end
+			else
+				for si = 1:numel(self.sampleData)
+					% Extract sample data and gate
+					[outData, sliceGates] = self.slice(si, sliceParams);
+					inGate = Gating.gatePolygon(outData(:, 1), outData(:, 2), axScale, gatePolygon);
+					
+					% Adjust index based on input gate
+					inGateFixed = Gating.fixGateIdxs(sliceGates{1}, inGate);
+					self.sampleData(si).gates.(gateName) = inGateFixed;
+				end
+			end
+			
+			% Todo adjust for existing gate idxs
+			
+			% Save gate polygon
+			self.gatePolygons.(gateName) = gatePolygon;
+			self.addGates(gateName);
+				
+			% Save gate figure
+			if ~isempty(gateFig)
+				gateFigFname = [gateDirSamples, self.date, '_', self.name, '_gate', gateName, '.fig'];
+				saveas(gateFig, gateFigFname);
+			end
+			
+			
+			% --- Helper Functions --- % 
+			
+			
+			function zCheckInputs_customGate()
+				
+				if exist('sliceParams', 'var')
+					validateattributes(sliceParams, {'struct'}, {}, mfilename, 'sliceParams', 2);
+				else
+					sliceParams = struct();
+				end
+				
+				if ~exist('axScale', 'var')
+					axScale = 'linear';
+				end
+			end
+		end
+		
+		
+		function self = convertToMEF(self, beadsControls, beadsSamples, options)
 			% Calibrate the data to standardized bead-based MEF units.
 			% The controls must already have been added (see addControls())
 			%
@@ -528,7 +674,7 @@ classdef FlowData < handle
 			assert(self.controlsAdded, 'Controls must be added before converting to MEF units!\n');
 			
 			% Check inputs
-			zCheckInputs_convertToMEF();
+			zCheckInputs_convertToMEF(self);
 			
 			% Setup new directory for fitting files/figs
 			beadDirControls = [self.controlFolder, 'Calibration', filesep];
@@ -547,14 +693,15 @@ classdef FlowData < handle
 			beadDirs = {beadDirControls, beadDirSamples};
 			for b = 1:numel(beads)
 				
-				if isequaln(beadsControls, beadsSamples)
-					% If the bead properties are the same, then skip the fitting for
-					% samples' beads and just use the controls' beads. This is for 
-					% the case where samples and controls are run the same day.
-					fitsSamples = fitsControls;
-					fprintf(1, 'Sample beads match control beads...using them for calibration\n');
-					break
-				end
+				% This is unnessesary - remove after ensuring so
+% 				if isequaln(beadsControls, beadsSamples)
+% 					% If the bead properties are the same, then skip the fitting for
+% 					% samples' beads and just use the controls' beads. This is for 
+% 					% the case where samples and controls are run the same day.
+% 					fitsSamples = fitsControls;
+% 					fprintf(1, 'Sample beads match control beads...using them for calibration\n');
+% 					break
+% 				end
 				
 				% Setup filenames, check if already exists
 				beadSaveName = [beads{b}.date, '_', beads{b}.type, '_', ...
@@ -563,10 +710,10 @@ classdef FlowData < handle
 				
 				if exist(mefFname, 'file')
 					fprintf(1, 'Loading pre-computed bead fits\n');
-					load(mefFname);
+					load(mefFname, 'mefFits');
 				else
-					% Get Controls MEF fits 
-					[mefFits, figFits] = Transforms.calibrateMEF(beadsControls, self.channels, options);
+					% Get MEF fits 
+					[mefFits, figFits] = Transforms.calibrateMEF(beads{b}, self.channels, options);
 
 					% Save channel fits (and figures if applicable)
 					save(mefFname, 'mefFits')
@@ -575,7 +722,7 @@ classdef FlowData < handle
 					if ~isempty(fieldnames(figFits))
 						for chID = 1:numel(self.channels)
 							saveas(figFits.(self.channels{chID}), ...
-									[beadDirs{b}, beadSaveName, '_', MEF_units{chID}, '_Fit.fig']); 
+									[beadDirs{b}, beadSaveName, '_', self.channels{chID}, '_', MEF_units{chID}, '_Fit.fig']); 
 						end
 						if isfield(figFits, 'manualPeaks')
 							saveas(figFits.manualPeaks, [beadDirs{b}, beadSaveName, '_manualPeaks.fig']);
@@ -616,7 +763,7 @@ classdef FlowData < handle
 			% --- Helper Functions --- %
 			
 			
-			function zCheckInputs_convertToMEF()
+			function zCheckInputs_convertToMEF(self)
 				
 				validateattributes(beadsControls, {'struct'}, {}, mfilename, 'beadsFilename', 1);
 				validateattributes(beadsSamples, {'struct'}, {}, mfilename, 'beadsFilename', 2);
@@ -640,7 +787,7 @@ classdef FlowData < handle
 		end
 		
 		
-		function convertToMEFL(self, showPlots)
+		function self = convertToMEFL(self, showPlots)
 			% Converts each channel to MEFL units using the compensated MEF units. 
 			% The two-color controls are utilized to get ratios between each MEF
 			% unit and MEFLs. Conversion factors are stored in self.meflConversions.
@@ -655,10 +802,7 @@ classdef FlowData < handle
 			% Check pre-requisites for running
 			assert(self.controlsAdded, 'Controls must be added before converting to MEFL units!\n');
 			assert(self.mefConverted, 'MEF conversion must be run before converting to MEFL units!\n');
-			
-			% Extract MEF units from Transforms class for naming
-			MEF_units = Transforms.getBeadUnits(self.channels);
-			
+						
 			% Check if conversions already exist
 			beadDir = [self.controlFolder, 'Calibration', filesep];
 			if ~exist(beadDir, 'file')
@@ -668,7 +812,7 @@ classdef FlowData < handle
 			
 			if exist(meflFname, 'file')
 				fprintf(1, 'Loading pre-computed MEFL conversions\n');
-				load(meflFname)
+				load(meflFname, 'meflFits')
 			else
 				% Compute mefl conversions
 				tcData = self.controlData(numel(self.channels) + 1 : 2 * numel(self.channels));
@@ -680,7 +824,7 @@ classdef FlowData < handle
 					for chID = 1:numel(self.channels)
 						if ~strcmpi(self.channels{chID}, 'FITC_A')
 							saveas(figFits.(self.channels{chID}), ...
-									[beadDir, MEF_units{chID}, '_MEFL_Conversion.fig']); 
+									[beadDir, self.channels{chID}, '_MEFL_Conversion.fig']); 
 						end
 					end
 				end
@@ -689,7 +833,7 @@ classdef FlowData < handle
 			% Add converted data as 'mefl' data type
 			for ch = self.channels
 				% Add MEFLs for controls
-				for i = 1:numel(self.controlData)
+				for i = 1:self.numControls
 					if isempty(self.controlData(i).(ch{:})), continue, end % Some tcData will be empty 
 					self.controlData(i).(ch{:}).mefl = self.controlData(i).(ch{:}).mef * meflFits.(ch{:});
 				end
@@ -707,10 +851,10 @@ classdef FlowData < handle
 		end
 		
 		
-		function compensate(self, dataType, gate, options)
+		function self = compensate(self, dataType, gates, options)
 			% Applies autofluorescence subtraction and matrix-based compensation
 			%
-			%	self.compensate(dataType, gate, plotsOn)
+			%	self.compensate(dataType, gates, options)
 			%
 			%	This function adds new dataTypes: {'comp', 'afs'}
 			%
@@ -719,9 +863,11 @@ classdef FlowData < handle
 			%		dataType	<char> Indicates which data type to use.
 			%					Can be any dataType in self.dataTypes
 			%
-			%		gate		<char> Indicates which gate to use.
+			%		gates		<char, cell> Indicates which gate(s) to use.
 			%					Can be any gate in self.gateNames, but
 			%					preferrably 'P1', or 'P3' if onlyP1 = false
+			%					 -> Also accepts a cell array of gate names,
+			%						each applied to a control (same order)
 			%
 			%		options		<struct> (optional) Optional property-value pairs:
 			%			'plotsOn':		If TRUE, shows the compensation plots, which
@@ -735,6 +881,9 @@ classdef FlowData < handle
 			%								(least-squares approximation)
 			%			'recompute':	If TRUE, forces re-calculation of the 
 			%							compensation fits
+			%			'save':			If TRUE, saves the compensation fits and
+			%							(if applicable) the generated figures
+			%								Default = true
 			
 			% Check inputs
 			zCheckInputs_compensate(self);
@@ -753,7 +902,7 @@ classdef FlowData < handle
 			if (exist(compFname, 'file') && ~all(logical(options.recompute)))
 				% Load existing sample gates
 				fprintf(1, 'Loading pre-computed coefficients and autofluorescence!\n');
-				load(compFname);
+				load(compFname, 'coeffs', 'ints');
 			else
 				% Compute slopes/intercepts for each pair of scData
 				scData = cell(1, numel(self.channels));
@@ -764,7 +913,7 @@ classdef FlowData < handle
 					scData{sc} = self.slice(sc, struct( ...
 						'controls', true, ...
 						'dataType', dataType, ...
-						'gate', gate));
+						'gate', gates{sc}));
 					
 					% Code for binnind data first
 % 					maxVal = max(slicedData(:));
@@ -783,10 +932,10 @@ classdef FlowData < handle
 			end
 			
 			% Subtract autofluorescence
-			self.operate('add', -ints, dataType, 'afs')
+			self.operate('add', -ints, dataType, 'afs');
 			
 			% Compensate
-			for cd = 1:numel(self.controlData)
+			for cd = 1:self.numControls
 				if isempty(self.controlData(cd).(self.channels{1})), continue, end
 				
 				dataMatrix = self.slice(cd, struct( ...
@@ -817,7 +966,7 @@ classdef FlowData < handle
 					scData{sc} = self.slice(sc, struct( ...
 						'controls', true, ...
 						'dataType', 'comp', ...
-						'gate', gate));
+						'gate', gates{sc}));
 					
 					% Code for binning data first
 % 					maxVal = max(slicedData(:));
@@ -835,12 +984,14 @@ classdef FlowData < handle
 						scData, self.channels, options);
 			end
 			
-			% Save data/figures
-			save(compFname, 'coeffs', 'ints')
-			if (isfield(fitFigs, 'pre') && ~isempty(fitFigs.pre)) 
-				% Doesn't run if data was re-loaded or plots were not requested
-				saveas(fitFigs.pre, [compDir, 'pre-comp.fig'])
-				saveas(fitFigs.post, [compDir, 'post-comp.fig'])
+			% Save data/figures (default = do saving)
+			if (~isfield(options, 'save') || options.save)
+				save(compFname, 'coeffs', 'ints')
+				if (isfield(fitFigs, 'pre') && ~isempty(fitFigs.pre)) 
+					% Doesn't run if data was re-loaded or plots were not requested
+					saveas(fitFigs.pre, [compDir, 'pre-comp.fig'])
+					saveas(fitFigs.post, [compDir, 'post-comp.fig'])
+				end
 			end
 			
 			self.coefficients = coeffs; 
@@ -855,7 +1006,12 @@ classdef FlowData < handle
 			
 			function zCheckInputs_compensate(self)
 				validatestring(dataType, self.dataTypes, mfilename, 'dataType', 1);
-				validatestring(gate, self.gateNames, mfilename, 'gate', 2);
+				if ischar(gates), gates = {gates}; end % For simplicity
+				for gi = 1:numel(gates)
+					validatestring(gates{gi}, self.gateNames, mfilename, 'gate', 2);
+				end
+				% If one gate given, extend gates to match # of channels
+				if (numel(gates) == 1), gates = repmat(gates, 1, numel(self.channels)); end
 				
 				if ~exist('options', 'var'), options = struct(); end
 				if ~isfield(options, 'plotsOn'), options.plotsOn = false; end
@@ -873,7 +1029,7 @@ classdef FlowData < handle
 		end
 		
 		
-		function bin(self, binInputs, binDataType)
+		function self = bin(self, binInputs, binDataType, doPar)
 			% Sorts the sample data using the given set of channels/edges into a
 			% number of bins using the given dataType for assignments. 
 			%
@@ -888,6 +1044,9 @@ classdef FlowData < handle
 			%		
 			%		binDataType		<char> The cell dataType to use (eg 'mefl', 'comp')
 			%
+			%		doPar			<logical> (Optional) Flag to use parallel
+			%						computing for binning. Default = false. Runs
+			%						with default MATLAB pool generation. 
 			%
 			%	Implementation notes:
 			%		The binning method (FlowAnalysis.simpleBin()) operates in 
@@ -907,19 +1066,31 @@ classdef FlowData < handle
 			
 			[binChannels, binEdges] = zCheckInputs_bin(self);
 			
+			slicedData = cell(1, self.numSamples);
 			for i = 1:self.numSamples
 								
-				slicedData = self.slice(i, struct( ...
+				slicedData{i} = self.slice(i, struct( ...
 						'channels', {binChannels}, ...
 						'dataType', binDataType, ...
 						'equalize', false));
 				
-				self.bins{i} = FlowAnalysis.simpleBin(slicedData, binEdges);
-				
 			end
 			
-			self.numBins = numel(self.bins{1});
-			self.binSizes = size(self.bins{1});
+			binnedData = cell(size(slicedData));
+			if doPar
+				parfor i = 1:numel(slicedData)
+					binnedData{i} = FlowAnalysis.simpleBin(slicedData{i}, binEdges);
+				end
+			else
+				for i = 1:numel(slicedData)
+					binnedData{i} = FlowAnalysis.simpleBin(slicedData{i}, binEdges);
+				end
+			end
+			
+			self.bins = binnedData;
+			self.numBins = numel(binnedData{1});
+			bSizes = size(binnedData{1});
+			self.binSizes = bSizes(1:numel(binChannels)); % Handles single-channel binning so only one size is given
 			self.binInputs = binInputs;
 			self.binDataType = binDataType;
 			self.binned = true;
@@ -952,6 +1123,7 @@ classdef FlowData < handle
 				assert(any(strcmp(binDataType, self.dataTypes)), ...
 						'Bin data type does not match any existing data types: %s\n', binDataType);
 				
+				doPar = exist('doPar', 'var') && all(logical(doPar));
 			end
 		end
 		
@@ -983,7 +1155,11 @@ classdef FlowData < handle
 			%									Automatically forces 'dataType' to be 
 			%									'self.binDataType' regardless of whether 
 			%									they are given or not
-			%									<Can input 'all' to select all bins>
+			%									Can input 'all' to select all bins.
+			%									** Requesting anything but all bins
+			%									will cause the output to be 2D rather 
+			%									than N+1 D as the data will not be 
+			%									reshaped to match the bin sizes.  
 			%
 			%		metrics			<char, cell> (Optional) A list of metrics to compute
 			%						Valid metrics:
@@ -995,25 +1171,32 @@ classdef FlowData < handle
 			%
 			%	Outputs
 			%		binStats	<struct> A struct where each field is the name of 
-			%					a statistical metric and the value is a BxC
-			%					matrix of the metric values in B bins across C
-			%					channels (channels given in sliceParams). 
-			%					--> We do not structure the bin stats into their "true" 
-			%						shape since this would require always requesting
-			%						bins from an entire row/column to avoid errors
-			%						in the matrix reshaping process. Additionally,
-			%						it would require quite a bit of deconvoluting
-			%						the requested bins and ultimately it is easier
-			%						to just have the user reshape their own data
+			%					a statistical metric and the value is a N+1 D
+			%					matrix of the metric values in N bin dimensions 
+			%					across C channels (given in sliceParams) in the 
+			%					final dimension. 
+			%					--> In the case of requesting stats from specific bins
+			%						rather than all of them, we do not structure the 
+			%						bin stats into their "true" shape and instead return 
+			%						a BxC matrix of metric values in each of the 
+			%						requested B bins in all the C channels. 
 			
 			zCheckInputs_computeBinStats(self);
 			
 			% Set up binStats struct
 			sliceBins = sliceParams.bins;
-			for m = metrics
-				binStats.(m{:}) = zeros(size(sliceBins, 1), numel(sliceParams.channels));
+			binAll = (numel(sliceBins) == self.numBins);
+			if binAll
+				binStatSize = self.binSizes;
+			else
+				binStatSize = size(sliceBins, 1);
 			end
-			binStats.numCells = zeros(size(sliceBins, 1), 1);
+			for m = metrics
+				if binAll
+					binStats.(m{:}) = zeros([binStatSize, numel(sliceParams.channels)]);
+				end
+			end
+			binStats.numCells = zeros(binStatSize);
 			
 			% Iterate over bins, compute stats for each one independently
 			for b = 1:size(sliceBins, 1)
@@ -1025,6 +1208,9 @@ classdef FlowData < handle
 				
 				for ch = 1:numel(sliceParams.channels)
 					
+					% Compute linear index
+					binStatIdx = b + numel(sliceBins) * (ch - 1);
+					
 					% Extract channel data
 					dataInBin = slicedData(:, ch);
 					dataInBin = dataInBin(~isnan(dataInBin));
@@ -1032,16 +1218,16 @@ classdef FlowData < handle
 					
 					% Calculate requested metrics
 					prctiles = prctile(dataInBin, [10, 50, 90]);
-					if ismember('p10', metrics), binStats.p10(b, ch) = prctiles(1); end
-					if any(ismember({'p50', 'median'}, metrics)), binStats.p50(b, ch) = prctiles(2); end
-					if ismember('p90', metrics), binStats.p90(b, ch) = prctiles(3); end
-					if ismember('mean', metrics), binStats.mean(b, ch) = mean(dataInBin); end
-					if ismember('geomean', metrics), binStats.geomean(b, ch) = geomean(dataInBin(posData)); end
-					if ismember('stdev', metrics), binStats.stdev(b, ch) = std(dataInBin); end
-					if ismember('geostdev', metrics), binStats.geostdev(b, ch) = geostd(dataInBin(posData)); end
-					if ismember('sem', metrics), binStats.sem(b, ch) = std(dataInBin) / sqrt(numel(dataInBin)); end
-					if ismember('semb', metrics), binStats.semb(b, ch) = semBootstrap(dataInBin); end % NOTE: SUPER SLOW
-% 					if ismember('ci95', metrics), binStats.CI95(b, ch) = ci95(dataInBin); end
+					if ismember('p10', metrics), binStats.p10(binStatIdx) = prctiles(1); end
+					if any(ismember({'p50', 'median'}, metrics)), binStats.p50(binStatIdx) = prctiles(2); end
+					if ismember('p90', metrics), binStats.p90(binStatIdx) = prctiles(3); end
+					if ismember('mean', metrics), binStats.mean(binStatIdx) = mean(dataInBin); end
+					if ismember('geomean', metrics), binStats.geomean(binStatIdx) = geomean(dataInBin(posData)); end
+					if ismember('stdev', metrics), binStats.stdev(binStatIdx) = std(dataInBin); end
+					if ismember('geostdev', metrics), binStats.geostdev(binStatIdx) = geostd(dataInBin(posData)); end
+					if ismember('sem', metrics), binStats.sem(binStatIdx) = std(dataInBin) / sqrt(numel(dataInBin)); end
+					if ismember('semb', metrics), binStats.semb(binStatIdx) = semBootstrap(dataInBin); end % NOTE: SUPER SLOW
+% 					if ismember('ci95', metrics), binStats.CI95(binStatIdx) = ci95(dataInBin); end
 				end
 			end
 			
@@ -1058,8 +1244,12 @@ classdef FlowData < handle
 				% Only need to check sliceParams for fields that are used by
 				% this function, so we let slice() itself check the rest.
 				validateattributes(sliceParams, {'struct'}, {}, mfilename, 'sliceParams', 2);
-				if (isfield(sliceParams, 'channels') && ischar(sliceParams.channels))
-					sliceParams.channels = {sliceParams.channels}; % Needed in main function
+				if isfield(sliceParams, 'channels') 
+					if ischar(sliceParams.channels)
+						sliceParams.channels = {sliceParams.channels}; % Needed in main function
+					end
+				else
+					sliceParams.channels = self.channels;
 				end
 				
 				% The default behavior is slightly different than slice - we
@@ -1075,7 +1265,7 @@ classdef FlowData < handle
 					end
 				end
 				
-				validMetrics = {'p10', 'p50', 'p90', 'median', 'mean', 'geomean', 'stdev', 'geostdev', 'sem', 'semb'};
+				validMetrics = {'numCells', 'p10', 'p50', 'p90', 'median', 'mean', 'geomean', 'stdev', 'geostdev', 'sem', 'semb'};
 				if exist('metrics', 'var')
 					validateattributes(metrics, {'cell', 'char'}, {}, mfilename, 'metrics', 3);
 					if ischar(metrics), metrics = {metrics}; end % For simplicity
@@ -1219,7 +1409,7 @@ classdef FlowData < handle
 		end
 		
 		
-		function dataMatrix = slice(self, sampleIDs, sliceParams)
+		function [dataMatrix, gateLogicals] = slice(self, sampleIDs, sliceParams)
 			% Slices the data, returning an N x M matrix of data from N cells in M channels. 
 			%
 			%	dataMatrix = self.slice(sampleID, sliceParams)
@@ -1227,6 +1417,7 @@ classdef FlowData < handle
 			%	Inputs
 			%		sampleIDs		<integer> The sample(s) to slice as given by
 			%						the numerical sample ID(s).
+			%
 			%		sliceParams		<struct> Optional, struct with optional fields:
 			%						'channels':  <cell, char>, defaults to self.channels
 			%						'dataType':  <char>, defaults to 'raw'
@@ -1256,21 +1447,34 @@ classdef FlowData < handle
 			%						sample where N is the number of cells in the
 			%						returned data and M is the number of
 			%						channels requested. 
+			%
+			%		gateLogicals	<cell> S x 1 cell array of N x 1 logical vector 
+			%						indicating which points of sample ID S are in the 
+			%						given gates/bins. 
 			
 			% Check and extract inputs
 			[sliceData, sliceChannels, sliceDataType, sliceGates] = zCheckInputs_slice(self);
 			
 			% Slice out data
 			dataMatrix = [];
+			gateLogicals = cell(size(sliceGates));
 			for s = 1:numel(sampleIDs)
 				
 				% Extract data
 				sID = sampleIDs(s);
 				dataS = zeros(numel(sliceGates{s}), numel(sliceChannels));
 				for ch = 1:numel(sliceChannels)
-					dataS(:, ch) = sliceData(sID).(sliceChannels{ch}).(sliceDataType)(sliceGates{s});
+					if ismember(sliceChannels, Gating.SCATTER_CHANNELS)
+						sdt = 'raw';
+					else
+						sdt = sliceDataType;
+					end
+					dataS(:, ch) = sliceData(sID).(sliceChannels{ch}).(sdt)(sliceGates{s});
 				end
 				dataMatrix = [dataMatrix; dataS];
+				
+				gateLogicals{s} = false(sliceData(sID).nObs, 1);
+				gateLogicals{s}(sliceGates{s}) = true;
 			end
 			
 			
@@ -1287,12 +1491,25 @@ classdef FlowData < handle
 					sliceParams = struct();
 				end
 				
+				% Slices data from the given channels
+				if isfield(sliceParams, 'channels')
+					sliceChannels = sliceParams.channels;
+					if ischar(sliceChannels), sliceChannels = {sliceChannels}; end % Force cell
+					sliceChannels = reshape(sliceChannels, 1, []); % Force row vector
+					
+					badChannels = setdiff(sliceChannels, [self.channels, Gating.SCATTER_CHANNELS]);
+					assert(isempty(badChannels), ...
+							'Channel not allowed: %s\n', badChannels{:});
+				else
+					sliceChannels = self.channels; % Default is all channels
+				end
+				
 				% Slices data from the given dataset
 				if (isfield(sliceParams, 'controls') && sliceParams.controls)
-					sliceData = self.controlData;
+					sliceData = catstruct(self.controlDataScatter, self.controlData);
 					sliceControls = true;
 				else
-					sliceData = self.sampleData;
+					sliceData = catstruct(self.sampleDataScatter, self.sampleData);
 					sliceControls = false;
 				end
 				
@@ -1302,18 +1519,6 @@ classdef FlowData < handle
 				sampleIDs = unique(round(sampleIDs)); 
 				assert(all(sampleIDs <= numel(sliceData)), ...
 					'At least one sampleID is too large!')
-				
-				% Slices data from the given channels
-				if isfield(sliceParams, 'channels')
-					sliceChannels = sliceParams.channels;
-					if ischar(sliceChannels), sliceChannels = {sliceChannels}; end % Force cell
-					sliceChannels = reshape(sliceChannels, 1, []); % Force row vector
-					badChannels = setdiff(sliceChannels, self.channels);
-					assert(isempty(badChannels), ...
-							'Channel not allowed: %s\n', badChannels{:});
-				else
-					sliceChannels = self.channels; % Default is all channels
-				end
 				
 				% Slices data of the given dataType
 				if isfield(sliceParams, 'dataType')
@@ -1418,7 +1623,7 @@ classdef FlowData < handle
 		end
 		
 		
-		function operate(self, operation, values, initDataType, newDataType)
+		function self = operate(self, operation, values, initDataType, newDataType)
 			% Applies the given operation to the given dataType, creating a new
 			% dataType which is a mathematically transformed with the operation
 			%
@@ -1447,12 +1652,12 @@ classdef FlowData < handle
 			
 			zCheckInputs_operate(self)
 			
-			for iii = 1:max(numel(self.controlData), self.numSamples)
+			for iii = 1:max(self.numControls, self.numSamples)
 				for ch = 1:numel(self.channels)
 					
 					chan = self.channels{ch};
 					
-					if (iii <= numel(self.controlData) && ~isempty(self.controlData(iii).(chan)))
+					if (iii <= self.numControls && ~isempty(self.controlData(iii).(chan)))
 						data = self.controlData(iii).(chan).(initDataType);
 						self.controlData(iii).(chan).(newDataType) = applyOps(data, ch);
 					end
@@ -1512,7 +1717,7 @@ classdef FlowData < handle
 		end
 				
 		
-		function threshGate(self, channels, mode, thresh)
+		function self = threshGate(self, channels, mode, thresh)
 			% Thresholds cells in the given channel(s) using the given mode to
 			% select thresholded cells from multiple channels. 
 			%
@@ -1568,9 +1773,11 @@ classdef FlowData < handle
 						combData = [combData; self.sampleData(i).(chan).raw(1:self.numSamples:end)];
 					end
 					
+					ss = FlowAnalysis.subSample(numel(combData), 1e4);
+					
 					figThresh = figure();
 					ax = gca(); hold(ax, 'on')
-					histogram(ax, Transforms.lin2logicle(combData, false, self.logicleParams))
+					histogram(ax, Transforms.lin2logicle(combData(ss), false, self.logicleParams))
 					title('Draw a line to set an x-axis threshold', 'fontsize', 16)
 					ylabel('Count', 'fontsize', 14)
 					xlabel(strrep(chan, '_', '-'), 'fontsize', 14)
@@ -1589,14 +1796,14 @@ classdef FlowData < handle
 				end
 				
 				% Find cells passing threshold and record gate
-				thrGateNames{ch} = ['TH_', self.SHORT_COLORS.(chan)];
+				thrGateNames{ch} = ['TH', self.SHORT_COLORS.(chan)];
 				for i = 1:self.numSamples
 					passThresh = (self.sampleData(i).(chan).raw >= threshVal);
 					self.sampleData(i).gates.(thrGateNames{ch}) = passThresh;
 				end
 				
 				% Do the same for controls
-				for i = 1:numel(self.controlData)
+				for i = 1:self.numControls
 					if ~isempty(self.controlData(i).(chan)) % Some tcData will be empty 
 						passThresh = (self.controlData(i).(chan).raw >= threshVal);
 						self.controlData(i).gates.(thrGateNames{ch}) = passThresh;
@@ -1641,7 +1848,7 @@ classdef FlowData < handle
 		end
 				
 		
-		function crossGates(self, gates, mode)
+		function self = crossGates(self, gates, mode)
 			% Crosses the given gates using the given crossing mode
 			% A new gate is created with name in the following form: 
 			%		'gate1_gate2_gate3_[...]_gateN'
@@ -1666,7 +1873,7 @@ classdef FlowData < handle
 					for i = 1:self.numSamples
 						self.sampleData(i) = crossOR(self.sampleData(i), newGateName);
 					end
-					for i = 1:numel(self.controlData)
+					for i = 1:self.numControls
 						if ~isempty(self.controlData(i).(self.channels{1})) % Some tcData will be empty 
 							self.controlData(i) = crossOR(self.controlData(i), newGateName);
 						end
@@ -1675,7 +1882,7 @@ classdef FlowData < handle
 					for i = 1:self.numSamples
 						self.sampleData(i) = crossAND(self.sampleData(i), newGateName);
 					end
-					for i = 1:numel(self.controlData)
+					for i = 1:self.numControls
 						if ~isempty(self.controlData(i).(self.channels{1})) % Some tcData will be empty 
 							self.controlData(i) = crossAND(self.controlData(i), newGateName);
 						end
@@ -1730,11 +1937,14 @@ classdef FlowData < handle
 				options = {};
 			end
 			
-			numGates = numel(self.gateNames);
+			% Some gates may not be applied to the sample data, so only look at
+			% names of gates literally assigned under sampleData
+			sampleGateNames = fieldnames(self.sampleData(1).gates);
+			numGates = numel(sampleGateNames);
 			gatePcts = zeros(self.numSamples, numGates);
 			
 			for g = 1:numGates
-				gate = self.gateNames{g};
+				gate = sampleGateNames{g};
 				
 				for si = 1:self.numSamples
 					gatePcts(si, g) = mean(self.sampleData(si).gates.(gate)) * 100;
@@ -1742,8 +1952,9 @@ classdef FlowData < handle
 			end
 			
 			% Convert to readable table
+			sampleGateNames = fieldnames(self.sampleData(1).gates);
 			gatePcts = array2table(gatePcts);
-			gatePcts.Properties.VariableNames = self.gateNames;
+			gatePcts.Properties.VariableNames = sampleGateNames;
 			
 			% Append to Sample Map
 			gatePcts = [self.sampleMap, gatePcts];
@@ -1754,7 +1965,7 @@ classdef FlowData < handle
 		end
 		
 		
-		function editSampleMap(self, newSampleMap)
+		function self = editSampleMap(self, newSampleMap)
 			% Allows the user to change the sample map by passing a new one to
 			% the object. This method ensures that the sample map is valid.
 			%
@@ -1765,7 +1976,7 @@ classdef FlowData < handle
 			
 			% Handle non-table inputs
 			if ischar(newSampleMap)
-				if ~strfind(newSampleMap, filesep)
+				if ~contains(newSampleMap, filesep)
 					newSampleMap = [self.folder, newSampleMap];
 				end
 				assert(logical(exist(newSampleMap, 'file')), 'New Sample Map file not found!');
@@ -1791,7 +2002,7 @@ classdef FlowData < handle
 		end
 		
 		
-		function editlogicleParams(self, newParams)
+		function self = editlogicleParams(self, newParams)
 			% Allows the user to change the logicle conversion parameters used
 			% by the object by passing a new set of parameters. This method
 			% ensures that the new parameters are valid.
@@ -1834,7 +2045,7 @@ classdef FlowData < handle
 % 		end
 		
 		
-		function addDataTypes(self, dataTypes)
+		function self = addDataTypes(self, dataTypes)
 			% Adds the given dataTypes to the dataTypes property if they are new
 			
 			validateattributes(dataTypes, {'cell', 'char'}, {}, mfilename, 'dataTypes', 1);
@@ -1854,7 +2065,7 @@ classdef FlowData < handle
 		end
 		
 		
-		function addGates(self, gates)
+		function self = addGates(self, gates)
 			% Adds the given gates to the gateNames property if they are new
 			
 			validateattributes(gates, {'cell', 'char'}, {}, mfilename, 'gates', 1);

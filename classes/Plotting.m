@@ -34,7 +34,7 @@ classdef Plotting < handle
 	methods (Static)
 		
 		
-		function density = computeDensity(dataMatrix, mode, numPoints, nonZero)
+		function density = computeDensity(dataMatrix, dMode, numPoints, nonZero)
 			% Computes the density of a given set of points
 			%
 			%	density = computeDensity(dataMatrix, mode, numPoints, nonZero)
@@ -43,7 +43,7 @@ classdef Plotting < handle
 			%		dataMatrix		<numeric> An NxM matrix of N elements in M 
 			%						dimensions for which to compute density
             %
-            %       mode			<char> Determines how density is calculated
+            %       dMode			<char> Determines how density is calculated
             %                         'neighbors'     Based on number of nearby points
             %                         'fastn'         'neighbors' using 1/10 points for speed
             %                         'kernel'        Kernel density estimation 
@@ -71,10 +71,10 @@ classdef Plotting < handle
 			% Check mode of point coloration
 			subsample = randperm(size(dataValid, 1), numPoints);
 			dataSub = dataValid(subsample, :);
-			switch mode 
+			switch dMode 
 				case {'neighbors', 'fastn'}
 					% Find how many neighbours there are less than dX and dY away.
-					if (strcmpi(mode, 'fastn'))
+					if (strcmpi(dMode, 'fastn'))
 						skip = 10;
 					else
 						skip = 1;
@@ -184,7 +184,7 @@ classdef Plotting < handle
 			function dataValid = zCheckInputs_computeDensity()
 				
 				validateattributes(dataMatrix, {'numeric'}, {}, mfilename, 'data', 1);
-				validatestring(mode, {'neighbors', 'fastn', 'kernel', 'hist'}, mfilename, 'mode', 2);
+				validatestring(dMode, {'neighbors', 'fastn', 'kernel', 'hist'}, mfilename, 'mode', 2);
 				
 				if exist('nonZero', 'var')
 					nonZero = any(logical(nonZero(:)));
@@ -433,7 +433,7 @@ classdef Plotting < handle
 		end
 		
 		
-		function densityplot(ax, xdata, ydata, nPoints, mode, cmap, dotSize, nonZero)
+		function densityplot(ax, xdata, ydata, nPoints, dMode, cmap, dotSize, nonZero)
 			% Plots a scatterplot with colors of the dots indicating density
 			%
 			%	densityplot(ax, xdata, ydata, nPoints, mode, cmap, dotSize, nonZero)
@@ -447,12 +447,12 @@ classdef Plotting < handle
             %       nPoints (integer)   The number of points to plot
             %                            - automatically selects min(nPoints, length(xdata))
             %
-            %       mode (string)       Determines how density is calculated
-            %                            'normal'        Computes density directly from the points
-            %                            'fast'          Uses 1/10 points to compute density
-            %                            'kernel'        Kernel density estimation 
-            %                                            (auto-selects bandwidth - see kde2d.m)
-            %                            'hist'          Interpolates density from a 2D histogram
+            %       dMode (string)		Determines how density is calculated
+            %							 'neighbors'     Based on number of nearby points
+            %							 'fastn'         'neighbors' using 1/10 points for speed
+            %							 'kernel'        Kernel density estimation 
+            %								             (auto-selects bandwidth - see kde2d.m)
+            %							 'hist'          Interpolates density from a 2D histogram
             %                            <numerical>     Colors the points based on a given set of values
             %                                            Must be the same size as xdata/ydata
             %       
@@ -496,14 +496,15 @@ classdef Plotting < handle
             zCheckInputs_densityplot();
 			
 			% Determine if density-based or directly-supplied coloration
-			if ischar(mode)
-				density = Plotting.computeDensity([xdata, ydata], mode, nPoints, nonZero);
+			if ischar(dMode)
+				density = Plotting.computeDensity([xdata, ydata], dMode, nPoints, nonZero);
 				[colors, sortIdx] = Plotting.getColors(density, cmap);
 			else
-				[colors, sortIdx] = Plotting.getColors(mode, cmap, struct('min', 0, 'max', 4.5, 'numColors', 100));
+				[colors, sortIdx] = Plotting.getColors(dMode, cmap, struct('min', 0, 'max', 4.5, 'numColors', 100));
 			end
 			
-			scatter(ax, xdata(sortIdx), ydata(sortIdx), 8, colors, 'filled');
+			ss = FlowAnalysis.subSample(numel(xdata), nPoints);
+			scatter(ax, xdata(sortIdx(ss)), ydata(sortIdx(ss)), dotSize, colors(ss, :), 'filled');
 			
 			
 			% --- Helper Functions --- %
@@ -515,11 +516,9 @@ classdef Plotting < handle
 				validateattributes(ydata, {'numeric'}, {'vector'}, mfilename, 'ydata', 3);
 				validateattributes(nPoints, {'numeric'}, {'scalar'}, mfilename, 'nPoints', 4);
 				nPoints = round(nPoints);
-				validateattributes(mode, {'char', 'numeric'}, {'vector'}, mfilename, 'mode', 5);
-				if ischar(mode)
-					validatestring(mode, {'normal', 'fast', 'kernel', 'hist'}, mfilename, 'mode', 5);
-				else
-					assert(all(size(mode) == size(xdata)), 'If numeric, mode must be the same size as the data!')
+				validateattributes(dMode, {'char', 'numeric'}, {'vector'}, mfilename, 'mode', 5);
+				if ~ischar(dMode)
+					assert(all(size(dMode) == size(xdata)), 'If numeric, mode must be the same size as the data!')
 				end
 				
 				% Check colormap (bulk of checking happends in getColors())
@@ -530,8 +529,8 @@ classdef Plotting < handle
 				end
 				
 				if exist('dotSize', 'var')
-					validateattributes(dotSize, {'numerical'}, {'scalar'}, mfilename, 'dotSize', 7);
-					dotSize = round(dotSize);
+					validateattributes(dotSize, {'numeric'}, {'scalar'}, mfilename, 'dotSize', 7);
+% 					dotSize = round(dotSize);
 				else
 					dotSize = 8;
 				end
@@ -742,8 +741,8 @@ classdef Plotting < handle
 					 (1:9).*10^7, (1:9).*10^8, 1e9]), ...
 					 doMEF, params);
 
-				% Tick labels
-				text = {'-10^6', '', '', '', '', '', '', '', '', '', ...
+				% Tick labels (took out -10^6 in first position)
+				text = { '', '', '', '', '', '', '', '', '', '', ...
 						 '', '', '', '', '', '', '', '', '', '  0^{ }', '', ...
 						 '', '', '', '', '', '', '', '', '', ...
 						 '', '', '', '', '', '', '', '', '10^6', ...
@@ -764,7 +763,8 @@ classdef Plotting < handle
 					 doMEF, params);
 
 				% Tick labels
-				text = {'-10^2', '', '', '', '', '', '', '', '', '', '  0^{ }', '', ...
+				text = { ...'-10^2', '', '', '', '', '', '', '', '', '', '  0^{ }', '', ...
+						 '', '', '', '', '', '', '', '', '', '', '', ...
 						 '', '', '', '', '', '', '', '', '10^2', ...
 						 '', '', '', '', '', '', '', '', '10^3', ...
 						 '', '', '', '', '', '', '', '', '10^4', ...
@@ -813,8 +813,8 @@ classdef Plotting < handle
 			function zCheckInputs_biexpAxes()
 
 				% Ensure boolean inputs
-				biexpX = (exist('biexpX', 'var') && all(logical(biexpX)));
-				biexpY = (exist('biexpY', 'var') && all(logical(biexpY)));
+				biexpX = (~exist('biexpX', 'var') || all(logical(biexpX)));
+				biexpY = (~exist('biexpY', 'var') || all(logical(biexpY)));
 				biexpZ = (exist('biexpZ', 'var') && all(logical(biexpZ)));
 				
 				doMEF = (exist('doMEF', 'var') && all(logical(doMEF)));
@@ -1784,7 +1784,7 @@ classdef Plotting < handle
 			%
 			%	2018-03-06		Added option for giving figure handle to plot on
 			
-			figBinHmap = zCheckInputs_binHeatmap();
+			[figBinHmap, doTitle] = zCheckInputs_binHeatmap();
 			
 			spIdx = 0;
 			for d5 = 1:size(dataMatrix, 5)
@@ -1831,26 +1831,34 @@ classdef Plotting < handle
 							'EdgeColor', 'none', 'FaceColor', 'flat');
 						
 						% Set axes properties/labels
+						% - We do this before setting values on the Z-axis since
+						%	we want any 3rd dim bins to be evenly spaced
+						Plotting.biexpAxes(ax, ismember('X', options.biexp), ...
+							   ismember('Y', options.biexp), ...
+							   ismember('Z', options.biexp), ...
+							   options.doMEF, options.logicle)
 						set(ax, axProperties);
 						xlabel(ax, labels{1});
 						ylabel(ax, labels{2});
-						Plotting.biexpAxes(ax, ismember('X', options.biexp), ...
-										   ismember('Y', options.biexp), ...
-										   ismember('Z', options.biexp), ...
-										   options.doMEF, options.logicle)
 					end
 					
 					% Plot Z (3D) labels if applicable
-					if (size(dataMatrix, 3) > 1)
+					if (size(dataMatrix, 3) > 1 && doTitle(3))
 						centers3 = cell(1, size(dataMatrix, 3));
 						for c3i = 1:numel(centers3)
-							if (size(dataMatrix, 3) < numel(edges{3}))
-								centers3{c3i} = num2str(mean([edges{3}(c3i), edges{3}(c3i + 1)]));
+							if iscell(edges{3}(c3i))
+								centers3{c3i} = edges{3}{c3i};
 							else
-								if iscell(edges{3}(c3i))
-									centers3{c3i} = edges{3}{c3i};
+								if (size(dataMatrix, 3) < numel(edges{3}))
+									edgeVal = mean([edges{3}(c3i), edges{3}(c3i + 1)]);
 								else
-									centers3{c3i} = num2str(edges{3}(c3i));
+									edgeVal = edges{3}(c3i);
+								end
+								if edges{3}(c3i) > 1e3
+									% Show large numbers in scientific notation
+									centers3{c3i} = sprintf('%.2g', edgeVal);
+								else
+									centers3{c3i} = num2str(edgeVal);
 								end
 							end
 						end
@@ -1863,35 +1871,44 @@ classdef Plotting < handle
 					end
 					
 					% Plot titles w/ 4/5D labels if applicable
-					if (size(dataMatrix, 4) > 1)
-						if (size(dataMatrix, 4) < numel(edges{4}))
-							center4 = num2str(mean([edges{4}(d4), edges{4}(d4 + 1)]));
+					titleTxt = {};
+					if (size(dataMatrix, 4) > 1 && doTitle(5))
+						if iscell(edges{4}(d4))
+							center4 = edges{4}{d4};
 						else
-							if iscell(edges{4}(d4))
-								center4 = edges{4}{d4};
+							if (size(dataMatrix, 4) < numel(edges{4}))
+								edgeVal = mean([edges{4}(d4), edges{4}(d4 + 1)]);
 							else
-								center4 = num2str(edges{4}(d4));
+								edgeVal = edges{4}(d4);
+							end
+							if edges{4}(d4) > 1e3
+								% Show large numbers in scientific notation
+								center4 = sprintf('%.2g', edgeVal);
+							else
+								center4 = num2str(edgeVal);
 							end
 						end
-						titleLine1 = sprintf('%s = %s', labels{4}, center4);
-					else
-						titleLine1 = '';
+						titleTxt = [titleTxt; {sprintf('%s = %s', labels{4}, center4)}]; %#ok<AGROW>
 					end
-					if (size(dataMatrix, 5) > 1)
-						if (size(dataMatrix, 5) < numel(edges{5}))
-							center5 = num2str(mean([edges{5}(d5), edges{5}(d5 + 1)]));
+					if (size(dataMatrix, 5) > 1 && doTitle(5))
+						if iscell(edges{5}(d5))
+							center5 = edges{5}{d5};
 						else
-							if iscell(edges{5}(d5))
-								center5 = edges{5}{d5};
+							if (size(dataMatrix, 5) < numel(edges{5}))
+								edgeVal = mean([edges{5}(d5), edges{5}(d5 + 1)]);
 							else
-								center5 = num2str(edges{5}(d5));
+								edgeVal = edges{5}(d5);
+							end
+							if edges{5}(d5) > 1e3
+								% Show large numbers in scientific notation
+								center5 = sprintf('%.2g', edgeVal);
+							else
+								center5 = num2str(edgeVal);
 							end
 						end
-						titleLine2 = sprintf('%s = %s', labels{5}, center5);
-					else
-						titleLine2 = '';
+						titleTxt = [titleTxt; {sprintf('%s = %s', labels{5}, center5)}]; %#ok<AGROW>
 					end
-					title(ax, {titleLine1; titleLine2})
+					title(ax, titleTxt);
 				end
 			end
 			
@@ -1910,7 +1927,7 @@ classdef Plotting < handle
 			% --- Helper Functions --- %
 			
 			
-			function figBinHmap = zCheckInputs_binHeatmap()
+			function [figBinHmap, doTitle] = zCheckInputs_binHeatmap()
 				
 				% Check data + dimensions
 				validateattributes(dataMatrix, {'numeric'}, {}, mfilename, 'data', 1);
@@ -1920,9 +1937,14 @@ classdef Plotting < handle
 				% Check edges
 				validateattributes(edges, {'cell'}, {}, mfilename, 'edges', 2);
 				assert(numel(edges) == ndims(dataMatrix), ...
-					'Number of edges (%d) does not match data dimensionality! (%d)', ...
-					numel(edges), ndims(dataMatrix));
+						'Number of edges (%d) does not match data dimensionality! (%d)', ...
+						numel(edges), ndims(dataMatrix));
+				doTitle = true(size(edges));
 				for ei = 1:numel(edges)
+					if isempty(edges{ei})
+						doTitle(ei) = false;
+						continue
+					end
 					if ei <= 2
 						assert(numel(edges{ei}) == (size(dataMatrix, ei) + 1), ...
 							   'Number of edges supplied for dim %d is incorrect!', ei)

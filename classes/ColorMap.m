@@ -46,7 +46,8 @@ classdef ColorMap < handle
             'grey',         struct('cm_top', [0.8, 0.8, 0.8], 'cm_bot', [0.2, 0.2, 0.2]), ...
             'redblue',      struct('cm_top', [1.0, 0.0, 0.0], 'cm_mid', [0.85, 0.85, 0.85], 'cm_bot', [0.0, 0.5, 1.0]), ...
 ...%             'greenpurp',    struct('cm_top', [0.0, 1.0, 0.5], 'cm_mid', [0.85, 0.85, 0.85], 'cm_bot', [0.5, 0.0, 1.0]));
-            'greenpurp',    struct('cm_top', [0.4, 1.0, 0.8], 'cm_mid', [0, 0, 0], 'cm_bot', [0.8, 0.4, 1.0]));
+            'greenpurp',    struct('cm_top', [0.4, 1.0, 0.8], 'cm_mid', [0, 0, 0], 'cm_bot', [0.8, 0.4, 1.0]), ...
+			'ocean',		struct('cm_top', [237 248 177] ./ 255, 'cm_mid', [65 182 196] ./ 255, 'cm_bot', [37 52 148] ./ 255));
      
     end
     
@@ -77,8 +78,11 @@ classdef ColorMap < handle
         end
         
         
-        function cm = getColormap(self, n)
+        function cm = getColormap(self, n, skew)
             % Returns a colormap with the specified length (n)
+			%
+			% 'skew' input allows for forcing the top/bottom values to
+			% white/black: 'white', 'black', {'white', 'black'}
             
             % Check input
             validateattributes(n, {'numeric'}, {}, mfilename, 'n', 1);
@@ -91,8 +95,13 @@ classdef ColorMap < handle
                 cm = eval(strcat(self.cm_text, '(', num2str(n), ')'));
             else
                 % If not a MATLAB colormap, then we use one of our own
-                top = self.COLORS.(self.cm_text).cm_top;
+				top = self.COLORS.(self.cm_text).cm_top;
                 bot = self.COLORS.(self.cm_text).cm_bot;
+				if exist('skew', 'var')
+					if ischar(skew), skew = {skew}; end
+					if ismember(skew, 'white'), top = [1, 1, 1]; end
+					if ismember(skew, 'black'), bot = [0, 0, 0]; end
+				end
                 
                 % Setup colormap output
                 cm = zeros(n, numel(top));
