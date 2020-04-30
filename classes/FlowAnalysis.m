@@ -80,30 +80,34 @@ classdef FlowAnalysis < handle
 			%
             % Update Log: 
 			% 
+			%	2019-05-16		Fixed issue where eg concatenating files in
+			%					FlowJo would add another field to the header
+			%					which would not allow concatenation of structs.
+			%					So now we only take fields seen in all files. 
             
             % Check inputs (should be the transfection marker channel name, then filenames)
             filenames = {};
-            for i = 1:numel(varargin)
+            for fi = 1:numel(varargin)
 				
 				% Check each input to see if it is a single char or a cell of
 				% filenames, since the method should take in variable inputs
-				if iscell(varargin{i})
-					names = varargin{i};
+				if iscell(varargin{fi})
+					fnames = varargin{fi};
 				else
-					names = varargin(i);
+					fnames = varargin(fi);
 				end
 				
 				% For loop handles multiple files in a cell, but also works for
 				% a single filename
-				for n = 1:numel(names)
-					name = names{n};
-					if (~strcmpi(name(end-3:end), '.fcs'))
-						name = strcat(name, '.fcs');
+				for ni = 1:numel(fnames)
+					fname = fnames{ni};
+					if (~strcmpi(fname(end-3:end), '.fcs'))
+						fname = strcat(fname, '.fcs');
 					end
-					if (~exist(name, 'file'))
-						error('Filename %s does not exist in the path', name);
+					if (~exist(fname, 'file'))
+						error('Filename %s does not exist in the path', fname);
 					end
-					filenames = [filenames, {name}]; %#ok<AGROW>
+					filenames = [filenames, {fname}]; %#ok<AGROW>
 				end
             end
             
@@ -122,62 +126,93 @@ classdef FlowAnalysis < handle
             end
             numFiles = numel(filenames);
             
-            % Run through and extract data from files, putting it into the
-            % standardized struct array.
-			for i = 1:numFiles
+            % Find channel names common to all files
+			fullfiles = cell(1, numFiles);
+			for fi = 1:numFiles
                 % Depending on how the files were added, append the filepaths
                 if (nargin == 0)
                     % In this case, they were selected from the GUI, so we need the path
-                    fullfile = strcat(filepath, filenames{i});
+                    fullfiles{fi} = strcat(filepath, filenames{fi});
                 else
                     % In this case, they were given, so we assume they are on the path
                     % or the full path was given with the file.
-                    fullfile = filenames{i};
+                    fullfiles{fi} = filenames{fi};
                 end
-                [fcsdat, fcshdr, fcsdatscaled, fcsdatcomp] = fca_readfcs(fullfile);
+                [~, fcshdr, ~, ~] = fca_readfcs(fullfiles{fi});
 
                 % Get channel names and store relevant data in data's fields
-                channelNames = {fcshdr.par.name};
-                data(i).header = fcshdr;
-                data(i).nObs = size(fcsdat, 1);
-                
-                % Ensure channel names are legal field declarations
-                for channel = 1:numel(channelNames)
-                    chanName = channelNames{channel};
-                    chanName(chanName == '-') = '_';
-                    chanName(chanName == ' ') = '_';
-                    chanName(chanName == '#') = 'N';
-                    channelNames{channel} = chanName;
-                end
+				if (fi == 1)
+					channelNames = {fcshdr.par.name};
+				else
+					channelNames = intersect(channelNames, {fcshdr.par.name}, 'stable');
+				end
+			end
+						
+			% Extract data
+			for fi = 1:numFiles
+				
+				[fcsdat, fcshdr, fcsdatscaled, fcsdatcomp] = fca_readfcs(fullfiles{fi});
+				
+                data(fi).header = fcshdr;
+                data(fi).nObs = size(fcsdat, 1);
+				currChannelNames = {fcshdr.par.name};
                 
                 % Extract data :: The data is in columns, so we need the column numbers
-                for channel = 1:numel(channelNames)
-                    
-                    chanName = channelNames{channel};
+				for ci = 1:numel(currChannelNames)
+					
+					chanName = currChannelNames{ci};
+					if ~ismember(chanName, channelNames), continue, end
+					
                     ch = struct();
                     
                     % Extract raw data
-                    ch.raw = fcsdat(:, channel);
+                    ch.raw = fcsdat(:, ci);
                     
                     % Only taken if the scaled is different
-                    if (~isempty(fcsdatscaled) && all(fcsdatscaled(:, channel) ~= fcsdat(:, channel)))
-                        ch.scaled = fcsdatscaled(:, channel);
+                    if (~isempty(fcsdatscaled) && all(fcsdatscaled(:, ci) ~= fcsdat(:, ci)))
+                        ch.scaled = fcsdatscaled(:, ci);
                     end
                     
                     % only taken if the comp is different
-                    if (~isempty(fcsdatcomp) && all(fcsdatcomp(:, channel) ~= fcsdat(:, channel)))
-                        ch.comp = fcsdatcomp(:, channel);
+                    if (~isempty(fcsdatcomp) && all(fcsdatcomp(:, ci) ~= fcsdat(:, ci)))
+                        ch.comp = fcsdatcomp(:, ci);
                     end
                     
                     % Store channel data
-                    data(i).(chanName) = ch;
-                end
-
+                    data(fi).(fixChanNames(chanName)) = ch;
+				end
+				
                 % Has adjusted names
-                data(i).chanNames = channelNames;
+                data(fi).chanNames = fixChanNames(channelNames);
 			end
 
             fprintf(1, 'Finished creating data struct\n');
+			
+			
+			% --- Helper functions --- %
+			
+			
+			function fixedCNames = fixChanNames(cnames)
+				% Ensure channel names are legal field names
+				
+				% Handle character input
+				outChar = false;
+				if ischar(cnames)
+					outChar = true;
+					cnames = {cnames}; 
+				end
+				
+				fixedCNames = cell(1, numel(cnames));
+				for chi = 1:numel(cnames)
+					cname = cnames{chi};
+% 					cname = regexprep(cname, '[\-\\/]', '_');
+					cname = strrep(cname, '#', 'N');
+					cname = regexprep(cname, '\W', '_'); % All other pesky characters
+					fixedCNames{chi} = cname;
+				end
+				
+				if outChar, fixedCNames = fixedCNames{:}; end
+			end
         end
         
         
@@ -338,30 +373,45 @@ classdef FlowAnalysis < handle
         end
         
         
-        function [bins, binSizes] = simpleBin(dataMatrix, binEdges)
+        function [bins, binSizes] = simpleBin(dataMatrix, binEdges, binFuncs)
             % Takes an array of data values and bins them using the given edges, 
             % returning a double array of bin IDs for each element
             %
+			%	[bins, binSizes] = simpleBin(dataMatrix, binEdges, binFuncs)
+			%
 			%	TIMING RESULTS: 1.3 seconds. (Fastest)
 			%
             %   Inputs
-            %       'dataMatrix'    A N x D double matrix of N elements with D
+			%
+            %       'dataMatrix'    <numeric> A N x D double matrix of N elements with D
             %						dimensions to be binned. 
-            %       'binEdges'		An array of edges defining each bin in logicle space.
-			%						The edges are applied to all dimensions. To make unique 
+			%
+            %       'binEdges'		<numeric, cell> An array of edges defining each bin in logicle 
+			%						space. The edges are applied to all dimensions. To make unique 
 			%						edges for each dimension, pass a cell array of bin edges, 
 			%						where each cell element corresponds with a channel in the
 			%						same order as the columns of 'dataMatrix'. 
 			%						*Note: Bin edges are sorted prior to binning.
+			%
+			%		'binFuncs'		<cell> (Optional) A cell array of anonymous functions defining
+			%						how 'binEdges' are adjusted for other bin dimensions.
+			%							Example:
+			%								{@(x) x / (x(2) + 1e5)}
+			%							Here, x is assumed to be an array representing the
+			%							channels in the same order as binEdges. So for two 
+			%							channels, the above code would adjust first channel's 
+			%							bins based on the values of the second channel. 
+			%							Leave an empty array or "@(x) 1" for channels which 
+			%							are not to be adjusted. 
             %
-            %   Output
-            %       'bins'          A D-dimensional cell matrix where each cell 
-            %                       holds a double array of numerical indexes 
-            %                       for each element in a given bin. The size of
-            %                       each dimension is given by the number of
-            %                       edges given in each dimensison. 
-			%		'binDims'		A vector indicating the number of bins in
-			%						each dimension. 
+            %   Outputs
+            %
+			%       'bins'          <cell> A D-dimensional cell matrix where each cell holds
+            %                       a double array of numerical indexes for each element in 
+			%						a given bin. The size of each dimension is given by the 
+			%						number of edges given in each dimensison. 
+			%
+			%		'binDims'		<numeric> A vector indicating the number of bins in each dimension. 
 			%
 			% Written By
 			% Ross Jones
@@ -370,21 +420,8 @@ classdef FlowAnalysis < handle
 			% 
 			% Update Log:
 			%
-            			
-			if iscell(binEdges)
-				% Unique bin edges for all
-				binSizes = zeros(1, numel(binEdges));
-				for be = 1:numel(binEdges)
-					binSizes(be) = numel(binEdges{be}) - 1;
-					binEdges{be} = sort(binEdges{be});
-				end
-			else
-				% Bin edges same and apply to all channels
-				binSizes = (numel(binEdges) - 1) .* ones(1, size(dataMatrix, 2));
-				be = binEdges; % Store for name override
-				binEdges = cell(1, size(dataMatrix, 2));
-				binEdges(:) = {be};
-			end
+			
+			binSizes = zCheckInputs_simpleBin();
             
             % Setup bins as a cell array with dimensions equal to number of cell channels. 
             numDims = length(binSizes);
@@ -397,13 +434,13 @@ classdef FlowAnalysis < handle
 			binCoords = ones(binSizes);
 			binCoords(1) = 0; % For the first iteration
 			cellsIdx = 1:size(dataMatrix, 1);
-			for i = 1:numel(bins)
+			for bi = 1:numel(bins)
 				
 				% Find bin coordinates in ND-space
-				for j = 1:numDims
-					binCoords(j) = binCoords(j) + 1;
-					if binCoords(j) > binSizes(j)
-						binCoords(j) = 1;
+				for di = 1:numDims
+					binCoords(di) = binCoords(di) + 1;
+					if binCoords(di) > binSizes(di)
+						binCoords(di) = 1;
 					else
 						break
 					end
@@ -411,12 +448,81 @@ classdef FlowAnalysis < handle
 				
 				% Identify all cells within bin by checking bin edges in each dimension
 				cellsInBin = true(size(dataMatrix(:, 1)));
-				for j = 1:numDims
-					cellsInBin = (cellsInBin & ...
-								 (dataMatrix(:, j) <= binEdges{j}(binCoords(j) + 1)) & ...
-								 (dataMatrix(:, j) > binEdges{j}(binCoords(j))));
+				edgesHigh = zeros(1, numDims);
+				edgesLow = zeros(1, numDims);
+				for di = 1:numDims
+					% Adjust for other bins
+					edgesHigh(di) = binEdges{di}(binCoords(di) + 1);
+					edgesLow(di) = binEdges{di}(binCoords(di));
 				end
-				bins{i} = cellsIdx(cellsInBin);
+				
+				for di = 1:numDims
+					
+					% Adjust high edges by other high edges and low by low
+					% (easier than finding centers and possibly more accurate (?)
+					edgeHigh = edgesHigh(di) * binFuncs{di}(edgesHigh);
+					edgeLow = edgesLow(di) * binFuncs{di}(edgesLow);
+					
+					cellsInBin = (cellsInBin & ...
+								 (dataMatrix(:, di) <= edgeHigh) & ...
+								 (dataMatrix(:, di) > edgeLow));
+				end
+				bins{bi} = cellsIdx(cellsInBin);
+			end
+			
+			
+			% --- Helper Functions --- %
+			
+			
+			function [binSizes] = zCheckInputs_simpleBin()
+				
+				validateattributes(dataMatrix, {'numeric'}, {}, mfilename, 'dataMatrix', 1);
+				validateattributes(binEdges, {'cell', 'numeric'}, {}, mfilename, 'binEdges', 2);
+				
+				% Check if binEdges needs to be expanded to all channels
+				if iscell(binEdges)
+					% Unique bin edges for all
+					binSizes = zeros(1, numel(binEdges));
+					for be = 1:numel(binEdges)
+						binSizes(be) = numel(binEdges{be}) - 1;
+						binEdges{be} = sort(binEdges{be});
+					end
+				else
+					% Bin edges same and apply to all channels
+					binSizes = (numel(binEdges) - 1) .* ones(1, size(dataMatrix, 2));
+					be = binEdges; % Store for name override
+					binEdges = cell(1, size(dataMatrix, 2));
+					binEdges(:) = {be};
+				end
+				
+				% Check binFuncs if applicable
+				if exist('binFuncs', 'var')
+					validateattributes(binFuncs, {'function_handle', 'cell'}, {}, mfilename, 'dataMatrix', 1);
+					
+					% If a single function handle, extend to all channels
+					if isa(binFuncs, 'function_handle')
+						bf = cell(size(binEdges));
+						bf(:) = {binFuncs};
+						binFuncs = bf;
+					end
+					
+					% Validate number of functions matches number of channels
+					assert(numel(binFuncs) == numel(binEdges), ...
+							'Number of bin functions (%d) does not match bin edges (%d)', ...
+							numel(binFuncs), numel(binEdges));
+					
+					% Check for empty or non-function entities and replace	
+					for fi = 1:numel(binFuncs)
+						if isempty(binFuncs{fi}) || ~isa(binFuncs{fi}, 'function_handle')
+							binFuncs{fi} = @(x) 1;
+						end
+					end
+				else
+					% In the case of no binFuncs, all are independent
+					binFuncs = cell(size(binEdges));
+					binFuncs(:) = {@(x) 1};
+				end
+				
 			end
 		end
 		
@@ -974,8 +1080,7 @@ classdef FlowAnalysis < handle
             
             % Find data sizes
             [H, W, D] = size(data);
-            C = length(channels);
-            
+            C = numel(channels);
             
             % For tracking progress
             totalProgress = H * W * D * C;
@@ -991,12 +1096,13 @@ classdef FlowAnalysis < handle
                 'SharedCovariance', false};     % Populations do not share covariance
             if (par)
                 % In order to maximize parallel processing, ensure data struct is linear
-                parfor i = 1:numel(data)
-                    for channel = channels
-                        
+                parfor di = 1:numel(data)
+                    for chi = 1:numel(channels)
+                        channel = channels{chi};
+						
                         % Log transform the data first
                         % --> perhaps better to do hyperlog or biexp tranform?
-                        d = data(i).(channel{:}).(dataType);
+                        d = data(di).(channel).(dataType);
 %                         logData = log10(d(d > 1e-2));
 %                         badData = (isinf(logData) | isnan(logData));
 %                         logData = logData(~badData);
@@ -1012,18 +1118,19 @@ classdef FlowAnalysis < handle
                         gmm = fitgmdist(logData, numPop, 'Options', options, parameters{:}); %#ok<PFBNS>
                         
                         % Extract population means and probability density function (log space) 
-                        data(i).(channel{:}).mus = sort(gmm.mu);
-                        data(i).(channel{:}).pdfs = gmm.pdf(reshape(xrange, [], 1));
+                        data(di).(channel).mus = sort(gmm.mu);
+                        data(di).(channel).pdfs = gmm.pdf(reshape(xrange, [], 1));
                     end
-                    fprintf(1, 'Worker %d has finished\n', i);
+                    fprintf(1, 'Worker %d has finished\n', di);
                 end
             else
-                for i = 1:numel(data)
-                    for channel = channels
-
+                for di = 1:numel(data)
+                    for chi = 1:numel(channels)
+						channel = channels{chi};
+						
                         % Log transform the data first
                         % --> perhaps better to do hyperlog or biexp tranform?
-                        d = data(i).(channel{:}).(dataType);
+                        d = data(di).(channel).(dataType);
                                 logData = log10(d(d > 1e-2));
                                 badData = (isinf(logData) | isnan(logData));
                                 logData = logData(~badData);
@@ -1039,8 +1146,8 @@ classdef FlowAnalysis < handle
                         gmm = fitgmdist(logData, numPop, 'Options', options, parameters{:});
 
                         % Extract population means and probability density function (log space) 
-                        data(i).(channel{:}).mus = sort(gmm.mu);
-                        data(i).(channel{:}).pdfs = gmm.pdf(reshape(xrange, [], 1));
+                        data(di).(channel).mus = sort(gmm.mu);
+                        data(di).(channel).pdfs = gmm.pdf(reshape(xrange, [], 1));
 
                         % Update progress
                         currProgress = currProgress + 1;
@@ -1077,7 +1184,7 @@ classdef FlowAnalysis < handle
 		end
 		
 		
-		function [indices] = subSample(len, numPoints)
+		function [indices] = subSample(len, numPoints, option)
 			% Returns a logical indices vector for subsampling numPoints 
 			% values from a vector of length len.
 			%
@@ -1088,10 +1195,15 @@ classdef FlowAnalysis < handle
 			%	Inputs 
 			%		len			<numeric> The length of the target vector/matrix
 			%		numPoints	<numeric> The number of points to subsample
+			%		options		<char>	  A string indicating how to subsample
+			%						'spread' - Evenly spaced indexes (default)
+			%						'first'  - Serial indexes starting at 1
+			%						'last'   - Serial indexes ending at 'len'
+			%						'rand'   - Randomly chosen indexes
 			%
 			%	Outputs
 			%		indices		<logical> A logical [len x 1] vector with numPoints
-			%					true values spaced as evenly as possible
+			%					true values spaced determined by the input 'options'
 			%
 			% Written by 
 			% Ross Jones
@@ -1104,6 +1216,12 @@ classdef FlowAnalysis < handle
 			% Check inputs
 			validateattributes(len, {'numeric'}, {'scalar'}, mfilename, 'length', 1);
 			validateattributes(numPoints, {'numeric'}, {'scalar'}, mfilename, 'numPoints', 2);
+			if exist('option', 'var')
+				option = lower(option);
+				validatestring(option, {'spread', 'first', 'last', 'rand'}, mfilename, 'option', 3);
+			else
+				option = 'spread';
+			end
 			len = round(len);
 			numPoints = round(numPoints);
 			
@@ -1111,8 +1229,17 @@ classdef FlowAnalysis < handle
 			if (numPoints >= len)
 				indices = true(len, 1);
 			else
-				indices = false(numPoints, 1);
-				numericIdxs = round(linspace(1, len, numPoints));
+				indices = false(len, 1);
+				switch option
+					case 'spread'
+						numericIdxs = round(linspace(1, len, numPoints));
+					case 'first'
+						numericIdxs = 1:numPoints;
+					case 'last'
+						numericIdxs = len - numPoints + 1 : len;
+					case 'rand'
+						numericIdxs = randperm(len, numPoints);
+				end
 				indices(numericIdxs) = true;
 			end
 		end

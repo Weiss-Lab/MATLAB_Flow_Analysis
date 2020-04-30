@@ -29,14 +29,15 @@ classdef Transforms < handle
 	
 	properties (Constant)
 		
-		MEF_CONVERSION_FACTOR = 2e3;
+		MEF_CONVERSION_FACTOR = 1e3;
 		
 		% Unique names - has error when you select more peaks than the one w/
 		% the least number of peaks!
 % 		CHANNEL_MAP = struct( ...
-% 			'BUV_396_A',		'MECSB', ...	% Not exactly right but the closest one
-% 			'Cascade_Blue_A',	'MECSB', ...
-% 			'Pacific_Blue_A',	'MEBFP', ...
+% 			'BUV_396_A',		'MEPB', ...		% Not exactly right but the closest one
+% 			'Cascade_Blue_A',	'MEPB', ...
+%			'Pacific_Blue_A',	'MEPB', ...
+%			'AmCyan_A',			'MEAmC', ...
 % 			'FITC_A',			'MEFL', ...
 % 			'PE_A',				'MEPE', ...
 %			'PE_YG_A'			'MEPE', ...		% Alt name for Koch LSRII-HTS2
@@ -50,43 +51,18 @@ classdef Transforms < handle
 		% All MEFLs - ignore peak # error, calculation should come out the same
 		CHANNEL_MAP = struct( ...
 			'BUV_396_A',		'MEFL', ...
+			'Cascade_Blue_A',	'MEFL', ...
 			'Pacific_Blue_A',	'MEFL', ...
+			'AmCyan_A',			'MEFL', ...
 			'FITC_A',			'MEFL', ...
 			'PE_A',				'MEFL', ...
 			'PE_YG_A',			'MEFL', ...		% Alt name for Koch LSRII-HTS2
 			'PE_Texas_Red_A',	'MEFL', ...
 			'PE_TxRed_YG_A',	'MEFL', ...		% Alt name for Koch LSRII-HTS2
+			'PE_Cy5_5_A',		'MEFL', ...
+			'PE_Cy7_A',			'MEFL', ...
 			'APC_A',			'MEFL', ...
 			'APC_Cy7_A',		'MEFL');
-		
-		BEAD_TYPES = {'RCP-30-5A'};
-		
-		RCP305A_LOTS_001 = {'AD04', 'AE01', 'AF01', 'AF02', ...
-							'AH01', 'AH02', 'AJ01'};
-		RCP305A_LOTS_002 = {'AA01', 'AA02', 'AA03', 'AA04', ...
-							'AB01', 'AB02', 'AC01', 'GAA01-R'};
-		
-		RCP305A_VALS_001 = struct( ... % from http://www.spherotech.com/RCP-30-5a%20%20rev%20H%20ML%20071712.xls
-			'MECSB',	[216, 464, 1232, 2940, 7669, 19812, 35474], ...
-			'MEBFP',	[861, 1997, 5776, 15233, 45389, 152562, 396759], ...
-			'MEFL',		[792, 2079, 6588, 16471, 47497, 137049, 271647], ...
-			'MEPE',		[531, 1504, 4819, 12506, 36159, 109588, 250892], ...
-			'MEPTR',	[233, 669, 2179, 5929, 18219, 63944, 188785], ...
-			'MECY',		[1614, 4035, 12025, 31896, 95682, 353225, 1077421], ...
-			'MEPCY7',	[14916, 42336, 153840, 494263], ...
-			'MEAP',		[373, 1079, 3633, 9896, 28189, 79831, 151008], ...
-			'MEAPCY7',	[2864, 7644, 19081, 37258]);
-		
-		RCP305A_VALS_002 = struct( ... % from http://www.spherotech.com/RCP-30-5a%20%20rev%20G.2.xls
-			'MECSB',	[179, 400, 993, 3203, 6083, 17777, 36331], ...
-			'MEBFP',	[700, 1705, 4262, 17546, 35669, 133387, 412089], ...
-			'MEFL',		[692, 2192, 6028, 17493, 35674, 126907, 290983], ...
-			'MEPE',		[505, 1777, 4974, 13118, 26757, 94930, 250470], ...
-			'MEPTR',	[207, 750, 2198, 6063, 12887, 51686, 170219], ...
-			'MECY',		[1437, 4693, 12901, 36837, 76621, 261671, 1069858], ...
-			'MEPCY7',	[32907, 107787, 503797], ...
-			'MEAP',		[587, 2433, 6720, 17962, 30866, 51704, 146080], ...
-			'MEAPCY7',	[718, 1920, 5133, 9324, 14210, 26735]);
 	end
 	
 	methods (Static)
@@ -186,6 +162,105 @@ classdef Transforms < handle
 					params = struct();
 				end
 				params = Transforms.checkLogicleParams(doMEF, params);
+			end
+		end
+		
+		
+		function [logicleData, params] = lin2logicle2(linearData, scale, params)
+			% Converts input linear data to a logicle scale 
+			% 
+			%	biexpData = Transforms.lin2logicle2(linearData, scale, params);
+			%
+			%	Inputs
+			%		linearData	<numeric> Linear-scale input values
+			%
+			%		scale		<numeric> A scaling factor for 'stretching' the
+			%					transform to cover scaled values (e.g. MEFLs)
+			%
+			%		params		<struct> (optional) Allows the user to specify
+			%					the exact logicle transform parameters to use
+			%						Accepted input fields (see below):
+			%							T, M, r
+			%
+			%	Outputs
+			%		logicleData	<numeric> Logicle-transformed data
+			%
+			%		params		<struct> The parameters used for conversion
+			%
+			%	Notes
+			%		The logicle conversion function is described by Parks, et al. 
+			%		"A New Logicle Display Method Avoids Deceptive Effects of 
+			%		Logarithmic Scaling for Low Signals and Compensated Data" 
+			%   
+			%		This method implements the inverse of Equation (5):
+			%	
+			%			S = T * 10^(M-W) * (10^(X-W) - p^2 * 10^-((X-W)/p) + p^2 - 1)
+			%				(for X >= W)
+			%		
+			%		Where (see Figure 2):
+			%			S := linear 'raw' values
+			%			X := logicle-scale values
+			%			T := "Top" of scale data value (ie the highest data
+			%				 value expected from the machine, typically 2^18)
+			%			M := Total plot width in asmymptototic decades
+			%				 (defualt = 4.5)
+			%			W := Width of linearization, computed as such:
+			%				 W = (M - log10(T/abs(r))) / 2		| Eqn (6)
+			%				 This determines the value of lin2logicle(0)
+			%			r := Reference point for negative data range
+			%				 (default = -150)
+			%
+			%		Since Equation 5 cannot be explicitly solved for X, a 
+			%		spline is fitted to generic X data to estimate the logicle
+			%		values of S
+			%
+			%
+			% Written By
+			% Breanna DiAndreth
+			% bstillo@mit.edu
+			% Weiss Lab, MIT
+			%
+			% Update Log:
+			%	2018-02-10 (Ross):	Merged this w/ lin2logicleMEF to do MEF 
+			%						conversion optionally, also added optional
+			%						logicle parameters input
+			%	2020-02-26 (Ross):	Updated 'scale' input to match biexpAxes2
+			
+			% Check inputs
+			zCheckInputs_lin2logicle2();
+			
+			% Converting logicle to linear is solveable, but the reverse is not, 
+			% so we fit a spline to generic logicle-lin data and then project
+			% the given data onto that spline
+			X = linspace(0, params.M, 1000);				% Generic X values
+			SX = Transforms.logicle2lin2(X, scale, params);	% S values from X
+			p = spline(SX ./ scale, X);					% Spline fit
+			
+			% Apply spline fit to the actual given S values
+			logicleData = ppval(p, linearData ./ scale);						
+			
+			
+			% --- Helper Functions --- %
+			
+			
+			function zCheckInputs_lin2logicle2()
+				
+				% Check input arguments
+				validateattributes(linearData, {'numeric'}, {}, mfilename, 'linearData', 1);
+				
+				if exist('scale', 'var')
+					validateattributes(scale, {'numeric'}, {'scalar'}, mfilename, 'scale', 2);
+				else
+					scale = 1;
+				end
+				
+				if exist('params', 'var')
+					validateattributes(params, {'struct'}, {}, mfilename, 'params', 3);
+				else
+					params = struct();
+				end
+				
+				params = Transforms.checkLogicleParams2(params);
 			end
 		end
 		
@@ -302,6 +377,123 @@ classdef Transforms < handle
 		end
 		
 		
+		function [linearData, params] = logicle2lin2(logicleData, scale, params)
+			% Converts input logicle data to a linear scale 
+			% 
+			%	linearData = Transforms.logicle2lin2(logicleData, scale, params);
+			%
+			%	Inputs
+			%		logicleData <numeric> Logicle-scale input values
+			%
+			%		scale		<numeric> A scaling factor for 'stretching' the
+			%					transform to cover scaled values (e.g. MEFLs)
+			%
+			%		params		<struct> (optional) Allows the user to specify
+			%					the exact logicle transform parameters to use
+			%						Accepted input fields (see below):
+			%							T, M, r
+			%
+			%	Outputs
+			%		linearData	<numeric> Linear-transformed data
+			%
+			%		params		<struct> The parameters used for conversion
+			%
+			%	Notes
+			%		The logicle conversion function is described by Parks, et al. 
+			%		"A New Logicle Display Method Avoids Deceptive Effects of 
+			%		Logarithmic Scaling for Low Signals and Compensated Data" 
+			%   
+			%		This method implements Equation (5):
+			%	
+			%			S = T * 10^(M-W) * (10^(X-W) - p^2 * 10^-((X-W)/p) + p^2 - 1)
+			%				(for X >= W)
+			%		
+			%		Where (see Figure 2):
+			%			S := linear 'raw' values
+			%			X := logicle-scale values
+			%			T := "Top" of scale data value (ie the highest data
+			%				 value expected from the machine, typically 2^18)
+			%			M := Total plot width in asmymptototic decades
+			%				 (defualt = 4.5)
+			%			W := Width of linearization, computed as such:
+			%				 W = (M - log10(T/abs(r))) / 2		| Eqn (6)
+			%				 This determines the value of lin2logicle(0)
+			%			r := Reference point for negative data range
+			%				 (default = -150)
+			%
+			%		For MEF (bead unit) data, the default is to scale the data
+			%		values by Transforms.MEF_CONVERSION_FACTOR after returning
+			%		from the logicle transformation. This parameter can be
+			%		overwritten with the optional params.MEF input.
+			%
+			% Written By
+			% Breanna DiAndreth
+			% bstillo@mit.edu
+			% Weiss Lab, MIT
+			% 
+			% Update Log:
+			%   2015-02-09 (Ross):	Added comments and intuitive variable names
+			%						Major speed up by using algebraic conversion 
+            %						instead of symbolic toolbox
+            %   2016-03-28 (Ross):	Made display breadth smaller w/ Bre's adjustment 
+			%						of r, which increases the relative size of the
+            %						area between 10^-2 and 10^2
+			%	2020-02-26 (Ross):	Updated 'scale' input to match biexpAxes2
+			
+			zCheckInputs_logicle2lin2()
+			
+			% This gives a range for linearization around zero (W).
+			W = (params.M - log10(params.T / abs(params.r))) / 2;
+			
+			% p and W are considered one parameter, p is introduced by the authors
+			% for compactness. Here we find p that solves their equivalence:
+			%   w = W * ln(10) = 2 * p * ln(p) / (p + 1)
+			% Solved by WolframAlpha:
+			w = W * log(10);
+			p = w / (2 * lambertw(w / 2 * exp(-w / 2)));
+			
+			% Find where the given data is above (thus valid).
+			posData = (logicleData >= W);
+			
+			% Compute and return the final linearized vector 
+			linearData = scale .* (toLin(logicleData, params) .* posData ...
+						  - toLin(2 * W - logicleData, params) .* (1 - posData));
+			
+			
+			% --- Helper Functions --- %
+			
+			
+			function S = toLin(X, params)
+				% Does the final conversion		| Eqn (5)
+				
+				S = params.T .* 10^-(params.M - W) .* ...
+					(10.^(X - W) - p^2 .* 10.^(-(X - W) ./ p) + p^2 - 1);
+			end
+						
+			
+			function zCheckInputs_logicle2lin2()
+				
+				% Check input arguments
+				validateattributes(logicleData, {'numeric'}, {}, mfilename, 'logicleData', 1);
+				
+				if exist('scale', 'var')
+					validateattributes(scale, {'numeric'}, {'scalar'}, mfilename, 'scale', 2);
+				else
+					scale = 1;
+				end
+				
+				if exist('params', 'var')
+					validateattributes(params, {'struct'}, {}, mfilename, 'params', 3);
+				else
+					params = struct();
+				end
+				
+				params = Transforms.checkLogicleParams2(params);
+
+			end
+		end
+		
+		
 		function requestedUnits = getBeadUnits(channels)
 			% Returns the MEF-equivalent unit names for the given channels
 			%
@@ -337,7 +529,7 @@ classdef Transforms < handle
 			end
 			
 			if numel(unique(requestedUnits)) < numel(channels)
-				warning('Non-unique bead units detected - be sure to check channel names')
+				warning('Non-unique bead units detected: check channel names if this is not intentional')
 			end
 		end
 		
@@ -357,6 +549,9 @@ classdef Transforms < handle
 			%		beadVals		<struct> A struct where bead unit names (eg 'MEF'  
 			%						are the keys and the bead peaks are the values
 			% 
+			%	The valid bead lots and the respective fluorophore counts are in
+			%	the folder /Spherotech Bead Data/. 
+			%
 			% Written By
 			% Ross Jones
 			% jonesr18@mit.edu
@@ -364,33 +559,47 @@ classdef Transforms < handle
 			% 
 			% Update Log:
 			% 
+						
+			% Find files w/ bead data: 'BEADS_<beadType>_<beadLot1_beadLot2...>.txt'
+			thisFname = mfilename('fullpath');
+			fnameSplit = split(thisFname, filesep);
+			folderName = join(fnameSplit(1:end-2), filesep); % Comes out as a 1x1 Cell
+			beadValueFiles = dir([folderName{:}, filesep, '**', filesep, 'BEADS*.txt']);
+			beadValueFnames = {beadValueFiles.name};
 			
-			% Check inputs
-			validBeadLots = [Transforms.RCP305A_LOTS_001, Transforms.RCP305A_LOTS_002];
-			validatestring(beadType, Transforms.BEAD_TYPES, mfilename, 'beadType', 1);
+			% Extract bead types and lots
+			beadValueFnamesSplit = cellfun(@(x) split(x, {'_', '.'}), ...
+					beadValueFnames, 'uniformoutput', false);
+			beadTypes = cellfun(@(x) x{2}, beadValueFnamesSplit, 'uniformoutput', false);
+			validBeadTypes = unique(beadTypes);
+			beadLots = cellfun(@(x) x(3:end-1)', beadValueFnamesSplit, 'uniformoutput', false);
+			validBeadLots = unique(cat(2, beadLots{:}));
+			
+			% Check input types
+			validatestring(beadType, validBeadTypes, mfilename, 'beadType', 1);
 			validatestring(beadLot, validBeadLots, mfilename, 'beadLot', 2);
 			validateattributes(channels, {'char', 'cell'}, {}, mfilename, 'channels', 3);
+			
+			% Check channels are valid
 			if ischar(channels), channels = {channels}; end % For simplicity
 			badChannels = setdiff(channels, fieldnames(Transforms.CHANNEL_MAP));
 			assert(isempty(badChannels), ...
 				'Channel not valid: %s', badChannels{:});
-			
 			requestedUnits = Transforms.getBeadUnits(channels);
+			
+			% Find which bead value file to load data from
+			whichFile = beadValueFnames{ ...
+					contains(beadValueFnames, beadType) & ...
+					contains(beadValueFnames, beadLot)};
+			beadValuesTable = readtable([beadValueFiles(1).folder, filesep, whichFile], ...
+					'delimiter', '\t');
+			beadValues = table2struct(beadValuesTable, 'ToScalar', true);
 			
 			% Collect values into struct
 			beadVals = struct();
-			switch beadType
-				case {'RCP-30-5A'}
-					switch beadLot
-						case Transforms.RCP305A_LOTS_001
-							for u = requestedUnits
-								beadVals.(u{:}) = Transforms.RCP305A_VALS_001.(u{:});
-							end
-						case Transforms.RCP305A_LOTS_002
-							for u = requestedUnits
-								beadVals.(u{:}) = Transforms.RCP305A_VALS_002.(u{:});
-							end
-					end
+			for u = requestedUnits
+				nonnan = ~isnan(beadValues.(u{:}));
+				beadVals.(u{:}) = beadValues.(u{:})(nonnan);
 			end
 		end
 
@@ -402,7 +611,7 @@ classdef Transforms < handle
             %
             %   Inputs
             %
-			%       data            A standard data struct. The channels must match those in channelFits. 
+			%       data            A standard data struct. The channels must be present in channelFits. 
             %
             %       channelFits     (Output from calibrateMEF())
             %                       An Nx2 table of slopes/intercepts for linear conversion of 
@@ -471,10 +680,10 @@ classdef Transforms < handle
 				validateattributes(data, {'struct'}, {}, mfilename, 'data', 1);
                 validateattributes(channelFits, {'table'}, {}, mfilename, 'channelFits', 2);
                 
-                channels = channelFits.Properties.VariableNames;
-                badChannels = setdiff(channels, fieldnames(data(1)));
+                channels = setdiff(fieldnames(data(1)), {'gates', 'nObs', 'Time'});
+                badChannels = setdiff(channels, channelFits.Properties.VariableNames);
                 assert(isempty(badChannels), ...
-                    'Channel not in data: %s\n', badChannels{:});
+                    'Channel not in fits: %s\n', badChannels{:});
                 
                 validatestring(dataType, fieldnames(data(1).(channels{1})), mfilename, 'dataType', 3);
 			end
@@ -534,7 +743,7 @@ classdef Transforms < handle
 			%		Overhauled interface and processing
 			
             % Check inputs, initialize data struct
-            [beadData, beadVals] = zCheckInputs_calMEF();
+            [beadData, beadVals] = zCheckInputs_calibrateMEF();
 			MEF_units = fieldnames(beadVals)'; % Start in same order as channels
 			if (numel(MEF_units) == 1 && numel(channels) > 1)
 				warning('Adjusting %s units to match all channels', MEF_units{1});
@@ -564,13 +773,13 @@ classdef Transforms < handle
 			end
 			
 			% Filter means
-			thresh = 8;
+			thresh = 8; % Not sure where this number comes from
 			filteredMeans = filterMeans(means, counts, centers, thresh);
 			
 			numPeaks = size(filteredMeans, 1) - 1;	
 			res_min = inf;
 			opt = optimoptions('lsqcurvefit', 'Display', 'off');
-			for hpi = 1 : (MAX_PEAKS - numPeaks + 1)
+			for hpi = 0 : (MAX_PEAKS - numPeaks)
 				% Its a bit simpler to index peaks from the highest down,
 				% since all beads have the largest populations, but some
 				% don't have smaller ones. By flipping so that low indexes 
@@ -578,7 +787,7 @@ classdef Transforms < handle
 				% the index for each bead population up or down.
 				% --> hpi := highestPeakIndex
 				
-				highestPeak = BEAD_PEAKS - hpi + 1;
+				highestPeak = BEAD_PEAKS - hpi;
 				fprintf(1, 'Trying highest peak: %d\n', highestPeak);
 				
 				% Iterate over each channel and add up residuals
@@ -586,28 +795,27 @@ classdef Transforms < handle
 				res_all = zeros(1, numel(channels));
 				fits = zeros(2, numel(channels));
 				for chID = 1:numel(channels)
-
+					
 					% Extract vals 
-					MEF = flipud(beadVals.(MEF_units{chID})');
-
+					MEF = flipud(beadVals.(MEF_units{chID}));
+					
 					% Identify which bead pops to query
-					beadPops = hpi : (hpi + numPeaks - 1);
+					beadPops = hpi + 1: (hpi + numPeaks);
 					pointsMean = filteredMeans(2:end, chID); % Means already log10 transf
 					pointsMEF = flipud(log10(MEF(beadPops)));
-% 						pointsMEF = flipud((MEF(beadPops)));
-
+% 					pointsMEF = flipud((MEF(beadPops)));
+					
 					% Fit bead fluorescence to MEF values
 					linearFunc = @(p, x) p(1) * x + p(2);
-					fitNL = lsqcurvefit(linearFunc, [1; 1], pointsMean, pointsMEF, [], [], opt);
 					if ismember('nonLinear', options)
-						fit = fitNL;
+						fit = lsqcurvefit(linearFunc, [1; 1], pointsMean, pointsMEF, [], [], opt);
 					else
 						fit = lsqcurvefit(@(p, x) linearFunc([1; p(2)], x), [1; 1], pointsMean, pointsMEF, [], [], opt);
 					end
 					fits(:, chID) = reshape(fit, [], 1);
 					
 					% Measure and collate residuals
-					yResid = abs(pointsMEF - polyval(fitNL, pointsMean));
+					yResid = abs(pointsMEF - polyval(fit, pointsMean));
 					ssResid = sum(yResid.^2);
 					ssTotal = (length(pointsMEF) - 1) * var(pointsMEF);
 					res_all(chID) = ssResid / ssTotal;
@@ -625,11 +833,14 @@ classdef Transforms < handle
 					res_min = res;
 					res_all_min = res_all;
 					numPeaks_min = numPeaks;
-					highestPeak_min = BEAD_PEAKS - hpi + 1;
+					highestPeak_min = BEAD_PEAKS - hpi;
 					beadPops_min = BEAD_PEAKS - beadPops + 1;
 					fits_min = fits;
 					means_min = 10.^filteredMeans(2:end, :);
 % 						gmmMeans_min = means(2:end, :);
+				end
+				if (res_min == -inf) % The current peak was forced, skip the rest
+					break
 				end
 			end
 			
@@ -669,8 +880,8 @@ classdef Transforms < handle
 					xlabel('Fluorescence (AFU)')
 					
 					% Plot MEF fits, fit line, and squared sum of residuals
-					MEF = fliplr(beadVals.(MEF_units{chID}));
-					MEF = fliplr(MEF(BEAD_PEAKS - beadPops + 1));
+					MEF = flipud(beadVals.(MEF_units{chID}));
+					MEF = flipud(MEF(BEAD_PEAKS - beadPops + 1));
 					peakIntensity = meansLin(:, chID);
 					
 					% Plot fits
@@ -699,16 +910,16 @@ classdef Transforms < handle
 			% --- Helper Functions --- %
 			
 			
-			function [beadData, beadVals] = zCheckInputs_calMEF()
+			function [beadData, beadVals] = zCheckInputs_calibrateMEF()
 				
 				validateattributes(beads, {'struct'}, {}, mfilename, 'beadsFilename', 1);
-				validFields = {'filename', 'type', 'lot', 'date', 'cytometer'};
-				badFields  = setdiff(fieldnames(beads), validFields);
-				assert(isempty(badFields), 'Field not valid: %s\n', badFields{:})
+				minimumFields = {'filename', 'type', 'lot', 'date', 'cytometer'};
+				missingFields  = setdiff(minimumFields, fieldnames(beads));
+				assert(isempty(missingFields), 'Field not found: %s\n', missingFields{:})
 				
 				beadsFilename = beads.filename;
 				assert(logical(exist(beadsFilename, 'file')), ...
-					'File does not exist: %s\n', beadsFilename)				
+						'File does not exist: %s\n', beadsFilename)				
 				
 				% Type and lot are checked in Transforms.getBeadVals();
 				
@@ -724,8 +935,22 @@ classdef Transforms < handle
 				% Check channels are valid
 				badChannels = setdiff(channels, fieldnames(beadData(1)));
 				assert(isempty(badChannels), ...
-					'Channel does not exist: %s\n', badChannels{:});
+						'Channel does not exist: %s\n', badChannels{:});
 				
+				% Combine data from multiple bead samples if applicable 
+				% (should just be a single file)
+				if numel(beadData) > 1
+					for ch = 1:numel(channels)
+						channelData = [];
+						for bdi = 1:numel(beadData)
+							channelData = [channelData; beadData(bdi).(channels{ch}).raw]; %#ok<AGROW>
+						end
+						beadData(1).(channels{ch}).raw = channelData;
+					end
+					beadData(1).nObs = size(beadData.(channels{1}).raw, 1);
+					beadData = beadData(1);
+				end
+								
 				% Get bead MEF values
 				beadVals = Transforms.getBeadVals(beads.type, beads.lot, channels);
 			end
@@ -736,37 +961,48 @@ classdef Transforms < handle
 				% in order that they were given, find initial peaks for each channel
 				% independently so we can figure out how many bead populations to fit.
 				
-				extractedBeadData = [];
+				extractedBeadData = zeros(beadData.nObs, numel(channels));
+				numBins = round(size(extractedBeadData, 1) / 100);
 				figFits = struct();
 				counts = struct();
 				centers = struct();
+				
+				% Check CV of forward and side scatter to determine if gating is
+				% needed to extract "good" bead population
+				fscData = beadData.FSC_A.raw;
+				sscData = beadData.SSC_A.raw;
+				fscCV = std(fscData) / mean(fscData);
+				sscCV = std(sscData) / mean(sscData);
+				if true%(fscCV > 1.0 || sscCV > 2.0)
+% 					warnString = 'High FSC/SSC Variance detected, please gate';
+% 					warning(warnString)
+					[gateIdx, ~, figFits.gate] = Gating.gatePolygon( ...
+							fscData, sscData, struct('YScale', 'log', ...
+									'XLabel', struct('String', 'FSC\_A'), ...
+									'YLabel', struct('String', 'SSC\_A'), ...
+									'Title', struct('String', 'Gate Beads Scatter'))); 
+				else
+					gateIdx = true(beadData.nObs, 1);
+				end
+				
+				% Iterate over channels to extract data
 				for ch = 1:numel(channels)
-
+					
 					% Extract channel data
-					channelData = [];
-					for i = 1:length(beadData)
-						channelData = [channelData; beadData(i).(channels{ch}).raw]; %#ok<AGROW>
-					end
-					extractedBeadData(:, ch) = channelData; %#ok<AGROW>
-					numBins = round(length(channelData) / 100);
-
-					% Find points greater than 0 since we need to log transform for fitting
-					if ~exist('valid', 'var')
-						valid = (channelData > 0);
-					else
-						valid = valid & (channelData > 0);
-					end
-
+					extractedBeadData(:, ch) = beadData.(channels{ch}).raw;
+					
 					% Create histogram w/ biexp data so that peaks are easier to find
 					if showPlots
 						figFits.(channels{ch}) = figure(); 
 						subplot(2, 1, 1)
 					end
 					[counts.(channels{ch}), centers.(channels{ch})] = Plotting.biexhist( ...
-								channelData, numBins, showPlots);
+								extractedBeadData(:, ch), numBins, showPlots);
 				end
 				
-				extractedBeadData = extractedBeadData(valid, :);
+				% Only take positive data (that passes the gate if applicable)
+				valid = (sum(extractedBeadData > 0, 2) == numel(channels));
+				extractedBeadData = extractedBeadData((valid & gateIdx), :);
 			end
 			
 			
@@ -782,7 +1018,7 @@ classdef Transforms < handle
 						extrBeadDataBiex(:, sortIdx(end)), ...
 						extrBeadDataBiex(:, sortIdx(end-1)), ...
 						5000, 'hist', ColorMap('parula'));
-				title('Draw a line connecting the peaks (in any order)')
+				title('Draw a shape connecting the peaks (in any order)')
 				xlabel([strrep(channels{sortIdx(end)}, '_', '-'), ' (AFU)'])
 				ylabel([strrep(channels{sortIdx(end - 1)}, '_', '-'), ' (AFU)'])
 				h = impoly();
@@ -859,7 +1095,7 @@ classdef Transforms < handle
 		end
 		
 		
-		function [meflFits, figFits] = calibrateMEFL(controlData, channels, dataType, showPlots)
+		function [meflFits, figFits] = calibrateMEFL(controlData, channels, colors, dataType, showPlots)
 			% Computes conversions for MEF units to MEFL units using two-color controls 
 			%
 			%	Fits are calulated by simple linear regression - only the slope
@@ -873,6 +1109,11 @@ classdef Transforms < handle
 			%						to MEF. Must coincide in the same order as the
 			%						two-color controls in controlData.
 			%						 * Also accepts a char for a single channel
+			%
+			%		colors			<cell, char> Name of fluorescent proteins and/or 
+			%						fluorophores used in the experiment. 
+			%						 - Should be equivalent in number to and match 
+			%						   the order of 'channels'.
 			%
 			%		dataType		<char> The dataType to use for calculations
 			%						 - This should be the post-MEF conversion 
@@ -898,14 +1139,15 @@ classdef Transforms < handle
 			% 
 			
 			zCheckInputs_calibrateMEFL();
+			FITC_IDX = find(strcmpi('FITC_A', channels));
 			
 			% Compute conversions
 			meflFits = struct();
 			figFits = struct();
 			for chID = 1:numel(channels)
-				if strcmpi(channels{chID}, 'FITC_A') 
+				if (chID == FITC_IDX) 
 					% Skip FITC channel since it is the reference channel
-					meflFits.(channels{chID}) = 1;
+					meflFits.(colors{chID}) = 1;
 				else
 					currChanMEF = Transforms.CHANNEL_MAP.(channels{chID});
 					
@@ -929,14 +1171,14 @@ classdef Transforms < handle
 % 					[rval, slope, ~] = regression(xdata', ydata'); % Convert column vectors to rows
 % 					rsq = rval.^2;
 
-					meflFits.(channels{chID}) = slope;
+					meflFits.(colors{chID}) = slope;
 					
 					if (exist('showPlots', 'var') && showPlots)
 						
-						figFits.(channels{chID}) = figure(); 
+						figFits.(colors{chID}) = figure(); 
 						ax = gca(); hold(ax, 'on');
 						xrange = logspace(0, 9, 50);
-						 
+						
 						plot(ax, xdata, ydata, ...
 							 '.', 'MarkerSize', 2)
 						plot(ax, xrange, xrange * slope, ...
@@ -946,8 +1188,8 @@ classdef Transforms < handle
 						ax.XScale = 'log';
 						title(sprintf('Scale Factor: %.2f | R^2: %.3f', ...
 								slope, rsq), 'fontsize', 14)
-						ylabel('FITC_A (MEFL)')
-						xlabel(sprintf('%s (%s)', strrep(channels{chID}, '_', '-'), currChanMEF));
+						ylabel([colors{FITC_IDX}, ' (MEFL)'])
+						xlabel(sprintf('%s (%s)', strrep(colors{chID}, '_', '-'), currChanMEF));
 					end
 				end
 			end
@@ -960,13 +1202,19 @@ classdef Transforms < handle
 				validateattributes(controlData, {'struct'}, {}, mfilename, 'controlData', 1);
 				validateattributes(channels, {'cell', 'char'}, {}, mfilename, 'channels', 2);
 				if ischar(channels), channels = {channels}; end % Convert to cell for simplicity
-				assert(numel(channels) == numel(controlData), 'Number of channels and controls must be equal!\n');
+				assert(numel(channels) == numel(controlData), ...
+						'Number of channels and controls must be equal!\n');
+				
+				validateattributes(colors, {'cell', 'char'}, {}, mfilename, 'colors', 3);
+				if ischar(colors), colors = {colors}; end % For simplicity
+				assert(numel(colors) == numel(channels), ...
+						'Number of colors and channels must be equal!\n');
 				
 				validChannels = fieldnames(controlData(1));
 				badChannels = setdiff(channels, validChannels);
 				assert(isempty(badChannels), 'Channel not in controlData: %s\n', badChannels{:});
 				
-				validatestring(dataType, fieldnames(controlData(1).(channels{1})), mfilename, 'dataType', 3);
+				validatestring(dataType, fieldnames(controlData(1).(channels{1})), mfilename, 'dataType', 4);
 			end
 		end
 		
@@ -1325,6 +1573,17 @@ classdef Transforms < handle
 				params.MEF = 1;
 			end
 		end
+		
+		
+		function params = checkLogicleParams2(params)
+			% Simple function for checking and setting default logicle parameters
+			
+			% Set parameters
+			if ~isfield(params, 'T'), params.T = 2^18;	end
+			if ~isfield(params, 'M'), params.M = 4.5;	end
+			if ~isfield(params, 'r'), params.r = -150;	end
+		end
+
 		
     end
     

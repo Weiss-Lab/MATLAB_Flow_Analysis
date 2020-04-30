@@ -34,7 +34,41 @@ classdef Plotting < handle
 	methods (Static)
 		
 		
-		function density = computeDensity(dataMatrix, dMode, numPoints, nonZero)
+		function ax = setAxProps(ax, axProperties)
+			% An easier method to apply a struct of axes properties to an axis
+			%
+			%	ax = Plotting.setAxProps(ax, axProperties);
+			%
+			%	Inputs
+			%
+			%		ax				<Axes> The axes object to modify
+			%
+			%		axProperties	<struct> A struct array of axes property-value
+			%						pairs to modify. 
+			%
+			%	Outputs
+			%
+			%		ax				<Axes> The updated axes object
+			%
+			%	Axes handles point to objects with many fields, some of which
+			%	are themselves struct arrays. To edit these structs, we cannot
+			%	just say set(ax, 'Title', struct( ... )) - the Axes gets
+			%	confused because it is expecting a full String with several
+			%	other fields as well. Instead, we have to edit each desired
+			%	property independently. This method handles that while allowing
+			%	the input to still be a simple struct of property-value pairs. 
+			
+			for f = fieldnames(axProperties)'
+				if isstruct(axProperties.(f{:}))
+					set(ax.(f{:}), axProperties.(f{:}))
+				else
+					set(ax, f{:}, axProperties.(f{:}));
+				end
+			end
+		end
+		
+		
+		function [density, binCenters, binCounts] = computeDensity(dataMatrix, dMode, numPoints, nonZero)
 			% Computes the density of a given set of points
 			%
 			%	density = computeDensity(dataMatrix, mode, numPoints, nonZero)
@@ -56,6 +90,17 @@ classdef Plotting < handle
 			%		nonZero			(Optional) <logical> Flag to only estimate using
 			%						non-zero values
 			%
+			%	Outputs
+			%
+			%		density			An Nx1 vector of density values for each
+			%						element in dataMatrix.
+			%
+			%		binCenters		If computing with 'hist' mode, then the bin centers 
+			%						used in the calculation can be requested. 
+			%
+			%		binCounts		As with above, the binCounts can also be requested
+			%
+			%
 			% Written By
 			% Ross Jones
 			% jonesr18@mit.edu
@@ -71,6 +116,8 @@ classdef Plotting < handle
 			% Check mode of point coloration
 			subsample = randperm(size(dataValid, 1), numPoints);
 			dataSub = dataValid(subsample, :);
+			binCenters = [];	% Only fill if using dMode = 'hist'
+			binCounts = [];		% Same as above
 			switch dMode 
 				case {'neighbors', 'fastn'}
 					% Find how many neighbours there are less than dX and dY away.
@@ -333,7 +380,7 @@ classdef Plotting < handle
 			if (inputSize(2) == 1)
 				reshapeSize = [inputSize(1), 3];	% Handles column vector input
 			elseif (inputSize(1) == 1)
-				reshapeSize = [3, inputSize(2)];	% Handles row vector input
+				reshapeSize = [inputSize(2), 3];	% Handles row vector input
 			else
 				reshapeSize = [inputSize, 3];		% Handles 2D+ input
 			end
@@ -354,22 +401,18 @@ classdef Plotting < handle
 				else
 					cmap = parula(100);
 				end
-				
-				% Fix for inf values
-				inputData(inputData == inf) = max(inputData(~isinf(inputData)));
-				inputData(inputData == -inf) = min(inputData(~isinf(inputData)));
-				
+								
 				% Treat NaNs (no data) and complex (log(neg values)) as min 
 				% values, then later overwrite them with white so they don't 
 				% show up on normal plots
 				nanIdxs = isnan(inputData);
-				inputData(nanIdxs) = min(inputData);
+				inputData(nanIdxs) = min(inputData(~isinf(inputData)));
 				imagIdxs = (imag(inputData) ~= 0);
-				inputData(imagIdxs) = min(inputData(~imagIdxs));
+				inputData(imagIdxs) = min(inputData(~imagIdxs & ~isinf(inputData)));
 				
 				% Default options
-				MIN = min(inputData);
-				MAX = max(inputData);
+				MIN = min(inputData(~isinf(inputData)));
+				MAX = max(inputData(~isinf(inputData)));
 				nanColor = [1, 1, 1];	
 				imagColor = [0.5, 0.5, 0.5];
 				
@@ -426,6 +469,10 @@ classdef Plotting < handle
 						end
 					end
 				end
+				
+				% Fix for inf values
+				inputData(inputData == inf) = MAX;
+				inputData(inputData == -inf) = MIN;
 				
 				nanInfo = struct('idxs', nanIdxs, 'color', nanColor);
 				imagInfo = struct('idxs', imagIdxs, 'color', imagColor);
@@ -545,11 +592,14 @@ classdef Plotting < handle
 		end
         
         
-		function violinplot(ax, ydata, xcenter, mode, faceColor)
-			% Plots the data as a violin plot, which represents 
-			% density as a vertical, horizontally symmetric histogram
+		function h = violinplot(ax, ydata, xpos, binEdges, faceColor)
+			% Plots the data as a violin plot, which represents density as a vertical,
+			% horizontally symmetric histogram. The histograms are overlaid with
+			% a black box-and-whisker plot with the box representing the 25th - 75th
+			% percentiles, the whiskers showing the 95th - 5th percentiles, and the
+			% white dot in the middle showing the median.
 			%   
-			%	violinplot(ax, ydata, xcenter, mode, faceColor)
+			%	violinplot(ax, ydata, xpos, binEdges, faceColor)
 			%
 			%   Inputs
 			%   
@@ -557,18 +607,14 @@ classdef Plotting < handle
 			%
 			%       ydata (vector)      Values of data to plot
 			%
-			%       xcenter (integer)   The value to center the x-values on
+			%       xpos (integer)		The x-position of the violin
 			%
-			%       mode (string)       Determines how density is calculated
-			%                            'normal'        Computes density directly from the points
-			%                            'fast'          Uses 1/10 points to compute density
-			%                            'kernel'        Kernel density estimation 
-			%                                            (auto-selects bandwidth - see kde.m)
-			%                            'hist'          Interpolates density from a 2D histogram
+			%		binEdges (vector)	Bin edges for histogram computation
+			%							 - Should be equal for all violins for
+			%							   valid comparison
 			%       
 			%       faceColor (rgb)     The color of the violin face. The face is plotted with an
 			%                           alpha value of 0.5 to look nice.
-			%
 			%
 			%
 			% Written By
@@ -579,48 +625,204 @@ classdef Plotting < handle
 			% Update Log:
 			%
 			%	2018-01-28:		Switched to using separate density computing function
+			%	2018-10-03:		Fixed density calculation and added box plot overlay
 
 			% Check inputs
 			zCheckInputs_violinplot(); 
-			xcenter = round(xcenter(1)); % Ensure integer and only one point
-
-			% Fix negative infinite values by setting the resulting values to the 
-			% otherwise minimum value.
-			if any(ydata == -inf)
-				warning('Negative values detected - setting to min value')
-				ydata(ydata == -inf) = min(ydata(ydata ~= -inf));
-			end
-
-			% Reduce number of points to speed density calculation
-			numPoints = min(numel(ydata), 5000);
 			
 			% Compute density
-			density = Plotting.computeDensity(ydata, mode, numPoints);
-
-			% Put density on log scale for better visualization
-			density = log10(density);
-			density = interp1([min(density), max(density)], [0, 0.4], density);
-
+			binCounts = histcounts(ydata, binEdges, 'Normalization', 'count');
+			binCenters = reshape(binEdges(2:end) - diff(binEdges) / 2, [], 1);
+			
+			% Normalize to max value, then multiply by 0.4 so that 
+			%	violins don't overlap
+% 			binCounts = reshape(log10(binCounts), [], 1) * 0.4 / max(log10(binCounts(:)));
+			binCounts = reshape((binCounts), [], 1) * 0.4 / max((binCounts(:)));
+			valid = ~isinf(binCounts) & ~isnan(binCounts);
+			
 			% Plot violins
-			axes(ax);
-			fill( [xcenter + density; xcenter - flipud(density)], ...
-				  [points; flipud(points)], ...
-				  faceColor, 'EdgeColor', 'none');
-
+			h = fill(ax, [xpos + binCounts(valid); xpos - flipud(binCounts(valid))], ...
+					[binCenters(valid); flipud(binCenters(valid))], ...
+					faceColor, 'EdgeColor', 'none', 'LineWidth', 1);
+			
+			% Plot pseudo boxplot
+			prctiles = prctile(ydata, [95, 75, 50, 25, 5]);
+			errorbar(ax, xpos, prctiles(3), prctiles(3) - prctiles(5), ...
+					prctiles(1) - prctiles(3), 'k', 'linewidth', 0.5)
+			fill(ax, [xpos + 0.07 * ones(2, 1); xpos - 0.07 * ones(2, 1)], ...
+					[prctiles([2, 4])'; prctiles([4, 2])'], ...
+					'k', 'EdgeColor', 'none');
+			plot(ax, xpos, prctiles(3), '.w', 'markersize', 16);
+			
+			% TODO Get this to work someday - technically better than the hacked
+			% version above since the whiskers should be calculated by an algorithm
+% 			boxplot(ax, ydata, 'positions', xcenter, 'boxstyle', 'filled', 'colors', 'k')
+			
+			
 			% --- Helper Function --- %
 
 
 			function zCheckInputs_violinplot()
-
-				validateattributes(ydata, {'numeric'}, {'vector'}, mfilename, 'data', 2);
+				
+				validateattributes(ax, {'matlab.graphics.axis.Axes'}, {}, mfilename, 'ax', 1);
+				
+				validateattributes(ydata, {'numeric'}, {'vector'}, mfilename, 'ydata', 2);
 				ydata = reshape(ydata, [], 1); % Force column vector
-				validateattributes(xcenter, {'numeric'}, {}, mfilename, 'xcenter', 3);
-				validatestring(mode, {'normal', 'fast', 'kernel', 'hist'}, mfilename, 'mode', 4);
+				
+				% Fix negative infinite values by setting the resulting values to the 
+				% otherwise minimum value.
+				if any(ydata == -inf)
+					warning('Negative values detected - setting to min value')
+					ydata(ydata == -inf) = min(ydata(ydata ~= -inf));
+				end
+				
+				validateattributes(xpos, {'numeric'}, {}, mfilename, 'xpos', 3);
+				xpos = round(xpos(1)); % Ensure integer and only one point
+				
+				validateattributes(binEdges, {'numeric'}, {'vector'}, mfilename, 'binEdges', 4);
 				validateattributes(faceColor, {'numeric'}, {'vector'}, mfilename, 'faceColor', 5);
 				assert(length(faceColor) == 3);
+				
 			end
 		end
         
+		
+		function h = violincompare(ax, ydata1, ydata2, xcenter, binEdges, faceColors, options)
+			% Plots the data as a split violin plot comparing two samples.
+			% The histograms are overlaid with lines representing the 5th, 
+			% 25th, 50th (median), 75th, and 95th percentiles.
+			%   
+			%	violincompare(ax, ydata, xcenter, binEdges, faceColor)
+			%
+			%   Inputs
+			%   
+			%		ax (handle)			The axis handle to plot to
+			%
+			%       ydata1 (vector)		Values of data to plot 
+			%							(Sample 1, plotted on the left)
+			%
+			%       ydata2 (vector)		Values of data to plot
+			%							(Sample 2, plotted on the left)
+			%
+			%       xcenter (integer)   The value to center the x-values on
+			%
+			%		binEdges (vector)	Bin edges for histogram computation
+			%							 - Should be equal for all violins for
+			%							   valid comparison
+			%       
+			%       faceColors (rgb)	2x3 matrix of colors for violin faces.
+			%							Row 1: left face (ydata1)
+			%							Row 2: right face (ydata2)
+			%							The faces are plotted with an alpha value 
+			%							of 0.5 to look nice.
+			%
+			%		options (cell/char) (optional) A cell array of strings (or a single 
+			%							string) specifying optional plotting behavior:
+			%							'smooth'	Flag to smooth the histogram data
+			%
+			%
+			% Written By
+			% Ross Jones
+			% jonesr18@mit.edu
+			% Weiss Lab, MIT
+			%
+			% Update Log:
+			%
+			%	2018-01-28:		Switched to using separate density computing function
+			%	2018-10-03:		Fixed density calculation and added box plot overlay
+
+			% Check inputs
+			zCheckInputs_violincompare();
+			
+			% Compute density
+			binCounts1 = histcounts(ydata1, binEdges, 'Normalization', 'count');
+			binCounts2 = histcounts(ydata2, binEdges, 'Normalization', 'count');
+			binCenters = binEdges(2:end) - diff(binEdges) / 2;
+			
+			% Normalize to max value, then multiply by 0.4 so that 
+			%	violins don't overlap
+% 			binCounts = log10(binCounts) * 0.4 / max(log10(binCounts));
+			if ismember('smooth', options)
+				binCounts1 = smooth(binCounts1);
+				binCounts2 = smooth(binCounts2);
+			end
+			binCounts1 = binCounts1 * 0.4 / max(binCounts1(:));
+			binCounts2 = binCounts2 * 0.4 / max(binCounts2(:));
+			
+			% Force first and last values to be at zero to avoid messed-up plots
+			binCounts1 = [0; binCounts1; 0];
+			binCounts2 = [0; binCounts2; 0];
+			binCenters = binCenters([1, 1:end, end]);
+			
+			% Throw out inf and nan values
+			valid1 = ~isinf(binCounts1) & ~isnan(binCounts1);
+			valid2 = ~isinf(binCounts2) & ~isnan(binCounts2);
+
+			% Plot violins (ydata1 on left, ydata2 on right)
+			h = zeros(1, 2);
+			h(1) = fill(ax, xcenter - binCounts1(valid1), binCenters(valid1), ...
+					faceColors(1, :), 'EdgeColor', 'none', 'LineWidth', 1);
+			h(2) = fill(ax, xcenter + binCounts2(valid2), binCenters(valid2), ...
+					faceColors(2, :), 'EdgeColor', 'none', 'LineWidth', 1);
+			
+			% Plot pseudo boxplot
+			pcts1 = prctile(ydata1, [95, 75, 50, 25, 5]);
+			pcts2 = prctile(ydata2, [95, 75, 50, 25, 5]);
+			
+			linewidths = [0.5, 1, 2, 1, 0.5];
+			colorSums = mean(faceColors, 2);
+% 			lineColors = double((colorSums < 0.4) .* ones(2, 3));
+			lineColors = double((colorSums < 0.4) .* zeros(2, 3));
+			for pi = 1:numel(linewidths)
+				[~, ci1] = min(abs(binCenters - pcts1(pi)));
+				[~, ci2] = min(abs(binCenters - pcts2(pi)));
+				
+				plot(ax, xcenter - [binCounts1(ci1), 0], binCenters([ci1, ci1]), ...
+						'color', lineColors(1, :), 'linewidth', linewidths(pi))
+				plot(ax, xcenter + [0, binCounts2(ci2)], binCenters([ci2, ci2]), ...
+						'color', lineColors(2, :), 'linewidth', linewidths(pi))
+			end
+			
+			
+			% --- Helper Function --- %
+
+
+			function zCheckInputs_violincompare()
+
+				validateattributes(ydata1, {'numeric'}, {'vector'}, mfilename, 'ydata1', 2);
+				validateattributes(ydata2, {'numeric'}, {'vector'}, mfilename, 'ydata2', 3);
+				ydata1 = reshape(ydata1, [], 1); % Force column vector
+				ydata2 = reshape(ydata2, [], 1); % Force column vector
+				
+				% Fix negative infinite values by setting the resulting values to the 
+				% otherwise minimum value.
+				if any(ydata1 == -inf)
+					warning('Negative values detected - setting to min value')
+					ydata1(ydata1 == -inf) = min(ydata1(ydata1 ~= -inf));
+				end
+				if any(ydata2 == -inf)
+					warning('Negative values detected - setting to min value')
+					ydata2(ydata2 == -inf) = min(ydata2(ydata2 ~= -inf));
+				end
+				
+				validateattributes(xcenter, {'numeric'}, {}, mfilename, 'xcenter', 4);
+				if (round(xcenter) ~= xcenter)
+					warning('Non-integer ''xcetner'', rounding');
+					xcenter = round(xcenter(1)); % Ensure integer and only one point
+				end
+				
+				validateattributes(binEdges, {'numeric'}, {'vector'}, mfilename, 'binEdges', 5);
+				binEdges = reshape(binEdges, [], 1); % Force column vector
+				validateattributes(faceColors, {'numeric'}, {}, mfilename, 'faceColor', 6);
+				assert(all(size(faceColors) == [2, 3]), ...
+						'Input ''faceColors'' must be a 2 x 3 matrix');
+				
+				if ~exist('options', 'var')
+					options = {};
+				end
+			end
+		end
+		
         
 		function biexplot(x, y, plotArgs, options)
 			% NOTE: #Decrepit - to be removed before full release
@@ -702,9 +904,11 @@ classdef Plotting < handle
         end
 		
         
-        function biexpAxes(ax, biexpX, biexpY, biexpZ, doMEF, params)
+        function ax = biexpAxes(ax, biexpX, biexpY, biexpZ, doMEF, params)
             % Tranforms the given axes to a scale used for biexponential views.
             %   
+			%	ax = biexpAxes(ax, biexpX, biexpY, biexpZ, doMEF, params);
+			%
             %   Inputs (all optional - defaults to X/Y both logicle)
             %       
             %       biexpX	(logical)		TRUE - make x-axis biexponential
@@ -731,24 +935,22 @@ classdef Plotting < handle
             % Set axes limits
 			if doMEF
 				
-				AXES_MAX = 1.1e9;
-				AXES_MIN = -4e5;
+				AXES_MAX = 2^18 * Transforms.MEF_CONVERSION_FACTOR;
+				AXES_MIN = -1.5e2 * Transforms.MEF_CONVERSION_FACTOR;
 				
 				% Tick values
 				minorTickVals = Transforms.lin2logicle( sort( ...
-					[-10^6, -(1:9).*10^5, -(1:9).*10^4, 0, ...
-					 (1:9).*10^4, (1:9).*10^5, (1:9).*10^6, ...
-					 (1:9).*10^7, (1:9).*10^8, 1e9]), ...
+					[-10^5, -(1:9).*10^4, 0, ...
+					 (1:9).*10^4, (1:9).*10^5, ...
+					 (1:9).*10^6, (1:9).*10^7, (1:2).*10^8]), ...
 					 doMEF, params);
 
 				% Tick labels (took out -10^6 in first position)
-				text = { '', '', '', '', '', '', '', '', '', '', ...
-						 '', '', '', '', '', '', '', '', '', '  0^{ }', '', ...
-						 '', '', '', '', '', '', '', '', '', ...
+				text = { '-10^5', '', '', '', '', '', '', '', '', '', '', ...
+						 '', '', '', '', '', '', '', '', '', '10^5', ...
 						 '', '', '', '', '', '', '', '', '10^6', ...
 						 '', '', '', '', '', '', '', '', '10^7', ...
-						 '', '', '', '', '', '', '', '', '10^8', ...
-						 '', '', '', '', '', '', '', '', '10^9'};
+						 '', '', '', '', '', '', '', '', '10^8', ''};
 					 
 			else
 				
@@ -759,16 +961,15 @@ classdef Plotting < handle
 				minorTickVals = Transforms.lin2logicle( sort( ...
 					[-10^2, -(1:9).*10^1, 0, ...
 					 (1:9).*10^1, (1:9).*10^2, ...
-					 (1:9).*10^3, (1:9).*10^4, 1e5]), ...
+					 (1:9).*10^3, (1:9).*10^4, (1:2).*1e5]), ...
 					 doMEF, params);
 
 				% Tick labels
-				text = { ...'-10^2', '', '', '', '', '', '', '', '', '', '  0^{ }', '', ...
-						 '', '', '', '', '', '', '', '', '', '', '', ...
-						 '', '', '', '', '', '', '', '', '10^2', ...
+				text = { '-10^2', '', '', '', '', '', '', '', '', '', '', ...
+						 '', '', '', '', '', '', '', '', '', '10^2', ...
 						 '', '', '', '', '', '', '', '', '10^3', ...
 						 '', '', '', '', '', '', '', '', '10^4', ...
-						 '', '', '', '', '', '', '', '', '10^5'};
+						 '', '', '', '', '', '', '', '', '10^5', ''};
 			
 			end	
 			
@@ -828,6 +1029,221 @@ classdef Plotting < handle
 				% Set parameters
 				params = Transforms.checkLogicleParams(doMEF, params);
 			end
+		end
+		
+		
+		function ax = biexpAxes2(ax, scales, axProperties, params)
+            % Tranforms the given axes to a scale used for biexponential views.
+            %   
+			%	ax = biexpAxes(ax, scales, params);
+			%
+            %   Inputs (all optional - defaults to X/Y both logicle using scale factor = 1)
+            %       
+			%		scales		<struct> (Optional) Property-value pairs of scaling 
+			%					factors to use for each logicle-transformed dimension. 
+			%					 - Valid fields: 'x', 'y', 'z' (case-insensitive)
+			%					 - Any missing field will cause that dimension
+			%					   to be plotted linearly
+			%					 - The values here are used as the MEF value for
+			%					   logicle conversions and are used as references 
+			%					   for determining axes labels
+			%
+			%		axProperties	<struct> (optional) A struct of axes properties
+			%						that can be given to overwrite default options
+			%
+			%		params		<struct> (Optional) Biexp transform parameters
+			%					 - Note that the MEF parameter is overwritten
+			%					   based on the scale provided for each dimension
+			%					 - See Transforms.lin2logicle for more info
+			%		
+			%
+			% Written By
+			% Ross Jones
+			% jonesr18@mit.edu
+			% Weiss Lab, MIT
+			% 
+			% Update Log:
+			%
+            			
+            % Check inputs
+			zCheckInputs_biexpAxes2();
+			
+			dims = reshape(fieldnames(scales), 1, []);
+			for dim = dims
+				
+				% Don't set dim to @lower because its reference in 'scales'
+				% needs to be preseved
+				if ~any(strcmpi(dim{:}, {'x', 'X', 'y', 'Y', 'z', 'Z'})), continue, end
+				
+				% Set major ticks based on closest round log value
+				scaleFactor = 10^round(log10(scales.(dim{:})));
+				exps = (1:5) + log10(scaleFactor);
+				expsStr = strrep(num2str(exps), ' ', ''); % Remove white space
+				
+				% Set MEF parameter for logicle calculation
+				dimParams = params;
+				dimParams.MEF = scales.(dim{:});
+				
+				% Create tick values
+				tickVals = Transforms.lin2logicle( sort( ...
+					[-10^exps(2), -(1:9).*10^exps(1), 0, ...
+					 (1:9).*10^exps(1), (1:9).*10^exps(2), ...
+					 (1:9).*10^exps(3), (1:9).*10^exps(4), (1:2).*10^exps(5)]), ...
+					 true, dimParams);
+				
+				% Create tick labels
+				% --> To add back in the 0, replace the last element of row 1
+				% with the 0 that is commented out, then add another '' to the
+				% second row and delete the final '' in the last row
+				text = {['-10^', expsStr(2)], '', '', '', '', '', '', '', '', '', '', ...
+						 ...'', '', '', '', '', '', '', '', '', '', '', ... '0^{ }', ...
+						 '', '', '', '', '', '', '', '', '', [' 10^', expsStr(2)], ...
+						 '', '', '', '', '', '', '', '', [' 10^', expsStr(3)], ...
+						 '', '', '', '', '', '', '', '', [' 10^', expsStr(4)], ...
+						 '', '', '', '', '', '', '', '', [' 10^', expsStr(5)], ''};
+				
+				% Determine axes limits
+				AXES_MAX = 2^18 * scaleFactor;
+				AXES_MIN = -1.5e2 * scaleFactor;
+				axTransformed = Transforms.lin2logicle( ...
+						[AXES_MIN, AXES_MAX], true, dimParams);
+				
+				% Set axes parameters
+				set(ax, [dim{:}, 'Lim'], axTransformed, ...
+						[dim{:}, 'Tick'], tickVals, ...
+						[dim{:}, 'TickLabel'], text)
+			end
+			
+            % Set remaining axes properties
+			set(ax, 'TickLength', [0.02, 0.025], ...
+					'TickDir', 'out', ...
+					'LineWidth', 1, ...
+					'box', 'off')
+			
+			Plotting.setAxProps(ax, axProperties);
+			
+			
+				
+			
+			% --- Helper Functions --- %
+			
+			
+			function zCheckInputs_biexpAxes2()
+
+				% Check scales input
+				if exist('scales', 'var')
+					validateattributes(scales, {'struct'}, {}, mfilename, 'scales', 1);
+				else
+					scales = struct('x', 1, 'y', 1);
+				end
+				
+				if ~exist('axProperties', 'var') || ~isstruct(axProperties)
+					axProperties = struct();
+				end
+				
+				% Check params input
+				if exist('params', 'var')
+					validateattributes(params, {'struct'}, {}, mfilename, 'params', 3);
+				else
+					params = struct();
+				end
+				
+				% Set parameters (default to AFU scaling - so doMEF input is false)
+				params = Transforms.checkLogicleParams(false, params);
+			end
+		end
+		
+		
+		function ax = logAxes(ax, limits, axProperties, options)
+			% Converts the axes to log scales and overwrites the ticks
+			% so that they don't disappear and only show log-multiples of 5
+			%
+			%	ax = logAxes(ax, limits)
+			%
+			%	Inputs
+			%
+			%		ax				<Axes> The axes object to modify
+			%
+			%		limits			<struct> A struct where fields are 'x', 'y',
+			%						and/or 'z' and the values are log10-transformed 
+			%						axes limits, eg [3, 8] for [10^3, 10^8].
+			%
+			%		axProperties	<struct> (optional) A struct of axes properties
+			%						that can be given to overwrite default options
+			%
+			%		options			<char, cell> (Optional) Logical flags:
+			%							'zero': Sets the bottom tick value and
+			%							label to '0' - not a transformation!
+			%							'loglin': Plots log ticks and such for
+			%							log-transformed (but linear) data
+			%
+			%	Outputs
+			%	
+			%		ax				<Axes> The modified axes
+			
+			zCheckInputs_logAxes();
+			
+			dims = reshape(fieldnames(limits), 1, []);
+			for di = 1:numel(dims)
+				
+				dim = dims{di};
+				
+				% Don't set dim to @lower because its reference in 'scales'
+				% needs to be preseved
+				if ~any(strcmpi(dim, {'x', 'X', 'y', 'Y', 'z', 'Z'})), continue, end
+				
+				% If more than 7 log decades, skip every ceil(N/7)
+				drange = limits.(dim)(1) : ...
+						 ceil((limits.(dim)(2) - limits.(dim)(1)) / 7) : ...
+						 limits.(dim)(2);
+				
+				ticklabels = cellfun(@(x) ['10^{' num2str(x), '}'], ...
+							num2cell(drange), 'uniformoutput', false);
+				if ismember('zero', options)
+					ticklabels(1) = {'0'};
+				end
+				
+				if ismember('loglin', options)
+					set(ax, [dim, 'scale'], 'linear', ...
+							[dim, 'lim'], limits.(dim), ...
+							[dim, 'tick'], drange, ...
+							[dim, 'ticklabel'], ticklabels);
+				else
+					set(ax, [dim, 'scale'], 'log', ...
+							[dim, 'lim'], 10.^limits.(dim), ...
+							[dim, 'tick'], 10.^(drange), ...
+							[dim, 'ticklabel'], ticklabels)
+				end
+			end
+			
+			% Set remaining axes properties
+			set(ax, 'TickLength', [0.02, 0.025], ...
+					'TickDir', 'out', ...
+					'LineWidth', 1, ...
+					'box', 'off')
+			
+			Plotting.setAxProps(ax, axProperties);
+			
+			% --- Helper Functions --- %
+			
+			
+			function zCheckInputs_logAxes()
+				validateattributes(ax, {'matlab.graphics.axis.Axes'}, {}, mfilename, 'ax', 1);
+				validateattributes(limits, {'struct'}, {}, mfilename, 'limits', 2);
+				
+				if ~exist('axProperties', 'var') || ~isstruct(axProperties)
+					axProperties = struct();
+				end
+				
+				if exist('options', 'var')
+					validateattributes(options, {'char', 'cell'}, {}, mfilename, 'options', 4);
+					if ischar(options), options = {options}; end % for convenience
+					options = cellfun(@lower, options, 'uniformoutput', false);
+				else
+					options = {};
+				end
+			end
+						
 		end
 		
 		
@@ -911,6 +1327,94 @@ classdef Plotting < handle
 				% Set parameters
 				params = Transforms.checkLogicleParams(doMEF, params);
 				
+			end
+		end
+		
+		
+		function cbar = biexpColorbar2(ax, scale, params)
+            % Generates a colorbar w/ biexponential labels for a given axes.
+            %   
+			%	cbar = biexpColorbar2(ax, scale, params);
+			%
+            %   Inputs 
+			%
+			%		ax			<axes> Axes handle to plot onto
+            %       
+			%		scale		<numeric> (optional) scaling factor to use for the 
+			%					colorbar's logicle-transformation
+			%					 - The values here are used as the MEF value for
+			%					   logicle conversions and are used as references 
+			%					   for determining axes labels
+			%					 - Defaults to 1
+			%
+			%		params		<struct> (Optional) Biexp transform parameters
+			%					 - Note that the MEF parameter is overwritten
+			%					   based on the scale provided for each dimension
+			%					 - See Transforms.lin2logicle for more info
+			%
+			%
+			% Written By
+			% Ross Jones
+			% jonesr18@mit.edu
+			% Weiss Lab, MIT
+			% 
+			% Update Log:
+			%
+			
+			% Check inputs
+			zCheckInputs_biexpColorbar2();
+			
+			cbar = colorbar('peer', ax, 'EastOutside');
+			
+			% Adjust to closest round log value
+			scaleFactor = 10^round(log10(scale));
+			exps = (1:5) + log10(scaleFactor);
+			expsStr = strrep(num2str(exps), ' ', ''); % Remove white space
+
+			% Set MEF parameter for logicle calculation
+			cbarParams = params;
+			cbarParams.MEF = scaleFactor;
+
+			% Create tick values
+			tickVals = Transforms.lin2logicle( sort( ...
+				[-10^exps(2), -(1:9).*10^exps(1), 0, ...
+				 (1:9).*10^exps(1), (1:9).*10^exps(2), ...
+				 (1:9).*10^exps(3), (1:9).*10^exps(4), (1:2).*10^exps(5)]), ...
+				 true, cbarParams);
+
+			% Create tick labels
+			text = { ['-10^', expsStr(2)], '', '', '', '', '', '', '', '', '', '', ...
+					 '', '', '', '', '', '', '', '', '', ['10^', expsStr(2)], ...
+					 '', '', '', '', '', '', '', '', ['10^', expsStr(3)], ...
+					 '', '', '', '', '', '', '', '', ['10^', expsStr(4)], ...
+					 '', '', '', '', '', '', '', '', ['10^', expsStr(5)], ''};
+			
+			cbar.Ticks = tickVals;
+			cbar.TickLabels = text;
+			cbar.TickDirection = 'out';
+			
+			
+			% --- Helper Functions --- %
+			
+			
+			function zCheckInputs_biexpColorbar2()
+
+				% Check scales input
+				if exist('scale', 'var')
+					validateattributes(scale, {'numeric'}, {'positive'}, mfilename, 'scale', 1);
+				else
+					scale = 1;
+				end
+				
+				% Check params input
+				if exist('params', 'var')
+					validateattributes(params, {'struct'}, {}, mfilename, 'params', 2);
+				else
+					params = struct();
+				end
+				
+				% Set parameters (default to AFU scaling - so doMEF input is false)
+				params = Transforms.checkLogicleParams(false, params);
 			end
 		end
 
@@ -1292,13 +1796,14 @@ classdef Plotting < handle
             end
             
             % Plot data
-            for i = 1:numel(data)
+			binEdges = 0:0.1:4.5;
+            for di = 1:numel(data)
                 
                 % Assign x- and y-axis datasets
-                ydata = Transforms.lin2logicle(data(i).(channel).(dataType));
+                ydata = Transforms.lin2logicle(data(di).(channel).(dataType));
                 
                 % Plot points
-                Plotting.violinplot(ax, ydata, i, 'hist', colors(i, :));
+                Plotting.violinplot(ax, ydata, di, binEdges, colors(di, :));
             end
             
             % Set Y-axis to biexp
@@ -1372,15 +1877,7 @@ classdef Plotting < handle
 				assert(size(colors, 1) == numel(data), ...
 					   'Size of colors incorrect');
 			else
-				colors = repmat([ ...
-					0       0.4470  0.7410
-					0.8500  0.3250  0.0980
-					0.9290  0.6940  0.1250
-					0.4940  0.1840  0.5560
-					0.4660  0.6740  0.1880
-					0.3010  0.7450  0.9330
-					0.6350  0.0780  0.1840], ...
-					ceil(numel(data) / 7), 1);
+				colors = repmat(lines(7), ceil(numel(data) / 7), 1);
 			end
             
 			if isfield(inputs, 'xscale')
@@ -1404,7 +1901,7 @@ classdef Plotting < handle
 					case {'logicle', 'biexp'}
 						xdata = Transforms.lin2logicle(xdata);
 					case {'logicleMEF', 'MEF'}
-						xdata = Transforms.lin2logicleMEF(xdata);
+						xdata = Transforms.lin2logicle(xdata, true);
 					otherwise
 						error('Unrecognized xscale given: %s', inputs.xscale);
 				end
@@ -1428,7 +1925,7 @@ classdef Plotting < handle
 				case {'logicle', 'biexp'}
 					Plotting.biexpAxes(ax, true, false);
 				case {'logicleMEF', 'MEF'}
-					Plotting.biexpAxesMEF(ax, true, false);
+					Plotting.biexpAxes(ax, true, false, false, true);
 			end
 			
 			% Set Y-axis
@@ -1466,7 +1963,7 @@ classdef Plotting < handle
 		end
         
 		
-		function singleLineDensity(ax, xdata, color, options)
+		function [h, binCenters, binCounts] = singleLineDensity(ax, xdata, color, options, edges, float)
 			% Plots a sinlge line representing a histogram of values in a vector
 			% of given values. The Y-axis represents the probability density function.
 			%
@@ -1480,8 +1977,23 @@ classdef Plotting < handle
 			%		options		<cell, char> (optional) A cell array of strings (or a single 
 			%					string) specifying optional plotting behavior:
 			%						'shade'		Flag to shade in the area under the line. 
-			%						'counts'	Flag to plot bin counts rather than PDF
+			%						'counts'	Flag to plot bin counts rather than probability
+			%						'maxnorm'	Flag to normalize by the max count/probability 
+			%									value (has precedence).
+			%						'kde'		Flag to use kernel density estimation, not histogram
 			%						'smooth'	Flag to smooth the histogram data
+			%						'boxplot'	Flag to add lines denoting percentiles: 
+			%										[5, 25, 50 (median), 75, 95]
+			%		edges		<numeric> (optional) Edges to use for histogram binning
+			%					Default: 30 evenly spaced bins chosen by histcounts()
+			%		float		<numeric> (optional) A value to add to the baseline 
+			%					of the histogram to 'float' it above the x-axis
+			%
+			%	Outputs
+			%		h			<handle> The handle to the plotted element (eg for legends)
+			%		binCenters  <numeric> An array of computed bin center points
+			%		binCounts   <numeric> An array of computed bin counts
+			%						(normalized and smoothed if requested in inputs)
 			%
 			% Written By
 			% Ross Jones
@@ -1490,6 +2002,12 @@ classdef Plotting < handle
 			% 
 			% Update Log:
 			%
+			
+			% TODO
+			%	1) Rename to histogram
+			%	2) Check if bins are log or linearly spaced to compute centers
+			%	and maybe to also pre-transform the data
+			
 			
 			zCheckInputs_singleLineDensity();
 			
@@ -1503,20 +2021,37 @@ classdef Plotting < handle
 			end
 			
 			% Automatically find number of bins based on data
-			if ismember('counts', options)
-				normMode = 'count';
+			NUM_BINS = 32; % Power of 2 for KDE
+			if ismember('kde', options)
+				% Use kernel to estimate density
+				[~, binCounts, binCenters] = kde(xdata, NUM_BINS);
 			else
-				normMode = 'pdf';
-			end
-			[binCounts, edges] = histcounts(xdata, 30, 'Normalization', normMode);
-			
-			% Estimate bin centers by averaging the edges
-			binCenters = zeros(numel(edges) - 1, 1);
-			for j = 2:length(edges)
-				binCenters(j - 1) = mean(edges([j - 1, j]));
+				% Use histogram to estimate density
+				if ismember('counts', options)
+					histNormMode = 'count';
+				else
+					histNormMode = 'pdf';
+				end
+				if exist('edges', 'var')
+					binCounts = histcounts(xdata, edges, ...
+							'normalization', histNormMode);
+				else
+					[binCounts, edges] = histcounts(xdata, NUM_BINS, ...
+							'normalization', histNormMode);
+				end
+				if ismember('maxnorm', options)
+					binCounts = binCounts ./ max(binCounts) * 0.8;
+				end
+				
+				% Estimate bin centers by averaging the edges
+				binCenters = zeros(numel(edges) - 1, 1);
+				for j = 2:length(edges)
+					binCenters(j - 1) = mean(edges([j - 1, j]));
+				end
 			end
 			
 			% Ignore bins w/o data, otherwise gaps in the line plot will show up
+			binCounts = reshape(binCounts, [], 1);
 			hasPoints = (binCounts > 0);
 			binCounts = binCounts(hasPoints);
 			binCenters = binCenters(hasPoints);
@@ -1524,15 +2059,27 @@ classdef Plotting < handle
 				binCounts = smooth(binCounts);
 			end
 			
+			% Adjust lines to a common baseline
+			minX = min(binCenters);
+			maxX = max(binCenters);
+			minY = min(binCounts) / 10 + float; % In case log axes, don't use 0
+			binCenters = [minX; binCenters; maxX];
+			binCounts = [minY; binCounts + float; minY];
+			
 			% Plot w/ or w/o shading
 			if ismember('shade', options)
-				area(ax, binCenters, binCounts, 'FaceColor', color, 'linewidth', 1, 'FaceAlpha', 0.4);
-				plot(ax, binCenters, binCounts, 'color', color, 'linewidth', 3);
-				line(ax, [binCenters(1), binCenters(1)], [1, binCounts(1)], 'color', color, 'linewidth', 3);
-				line(ax, [binCenters(end), binCenters(end)], [1, binCounts(end)], 'color', color, 'linewidth', 3);
-			else
-				plot(ax, binCenters, binCounts, 'color', color, 'linewidth', 5);
+				patch(ax, binCenters, binCounts, color, 'edgeAlpha', 0,  'facealpha', 0.4);
 			end
+			if ismember('boxplot', options)
+				pcts = prctile(xdata, [5, 25, 50, 75, 95]);
+				linewidths = [0.5, 1, 2, 1, 0.5];
+				for pi = 1:numel(pcts)
+					[~, ci] = min(abs(binCenters - pcts(pi)));
+					plot(ax, binCenters([ci, ci]), [float, binCounts(ci)], ...
+							'color', color, 'linewidth', linewidths(pi))
+				end
+			end
+			h = plot(ax, binCenters, binCounts, 'color', color, 'linewidth', 2);
 			
 			
 			% --- Helper Functions --- %
@@ -1554,16 +2101,168 @@ classdef Plotting < handle
 				color = reshape(color, 1, []);
 				
 				% If no optionsa are given, make an empty input set
-				if ~exist('options', 'var')
+				if ~exist('options', 'var') || isempty(options)
 					options = {};
 				end
 				validateattributes(options, {'cell', 'char'}, {}, mfilename, 'options', 4);
+				if ischar(options), options = {options}; end % For simplicity
+				options = cellfun(@lower, options, 'uniformoutput', false);
 				
-				% For simplicity, make options be a cell array
-				if ischar(options), options = {options}; end
+				if exist('edges', 'var')
+					validateattributes(edges, {'numeric'}, {}, mfilename, 'edges', 5);
+				end
+				
+				if exist('float', 'var')
+					validateattributes(float, {'numeric'}, {'scalar'}, mfilename, 'float', 6);
+				else
+					float = 0;
+				end
 			end
 		end
 		
+		
+		function [ax] = barplot(ax, xpos, yvals, options, barProperties, axProperties)
+			% Generates a bar chart w/ error bars and (optionally) individual points)
+            %
+            %   Inputs:
+            %
+			%		ax				<axes> Axes handle to plot on
+			%
+			%		xpos			<numeric> A vector of x-axis centers for each bar
+            %
+			%       yvals			<numeric> A matrix of values for each point
+			%							Note: mean and standard deviation are
+			%							automatically computed to plot the bar and
+			%							errorbars. To change the calculations,
+			%							use the 'options' input. 
+            %
+ 			%		options			<cell, char> (Optional) A cell array of strings (or 
+			%						a single string) specifying optional plotting behavior:
+			%							'geomean'	Compute bar height w/ geomean 
+			%										rather than mean.
+			%							'geostd'	Compute errorbar height w/
+			%										geostd rather than std.
+			%							'relerr'	Compute errorbars using
+			%										relative error (for log plots)
+			%							'points'	Show individual points
+			%							'unierr'	Plot errorbars only on the
+			%										side of the bar facing away
+			%										from the x-axis
+			%
+            %       barProperties   <cell> (Optional) Cell array of bar plot optional inputs
+			%
+			%		axProperties	<struct> (Optional) Struct of axes properties
+			%
+            %   Outputs: 
+            %
+            %       ax              A handle to the figure axes
+            % 
+            % Written By 
+			% Ross Jones
+			% jonesr18@mit.edu
+			% Weiss Lab, MIT
+            %
+            % Update Log:
+            %   
+			
+			[ymeans, ystdsNeg, ystdsPos, errProperties] = zCheckInputs_barPlot();
+			
+			hold(ax, 'on')
+			bar(ax, xpos, ymeans, barProperties{:})
+			errorbar(ax, xpos, ymeans, ystdsNeg, ystdsPos, '.', 'markersize', 1, errProperties{:})
+			
+			if any(ismember({'points', 'dots'}, options))
+				% Copmute an average dx so that we know how much space there is
+				% between each bar for plotting dots
+				% --> Mode of sorted xpos to handle cases where xpos is not for
+				%	  all samples that will eventually be plotted and where the
+				%	  xpos are out of order
+				if (numel(xpos) > 1)
+					dx = mode(diff(sort(xpos))); 
+				else
+					dx = 1;
+				end
+				
+				xvals = linspace(0.7, 1.3, size(yvals, 1))';
+				rxi = zeros(size(yvals));
+				for xi = 1:numel(xpos)
+					rxi(:, xi) = randperm(numel(xvals))';
+				end
+				
+				xvals = repmat(xpos, size(yvals, 1), 1) + dx .* (xvals(rxi) - 1);
+				
+				scatter(ax, xvals(:), yvals(:), 10, 'k', 'filled')
+			end
+				
+			Plotting.setAxProps(ax, axProperties);
+			
+			
+			% --- Helper Functions --- %
+			
+			
+			function [ymeans, ystdsNeg, ystdsPos, errProperties] = zCheckInputs_barPlot()
+				
+				% Force into row vector
+				xpos = reshape(xpos, 1, []);
+				assert(size(xpos, 2) == size(yvals, 2), ...
+						'Number of columns in ''xpos'' and ''yvals'' inputs must match');
+				
+				if ~exist('barProperties', 'var')
+					barProperties = {};
+				end
+				if ~exist('axProperties', 'var') || isempty(axProperties)
+					axProperties = struct();
+				end
+				if exist('options', 'var')
+					if ischar(options), options = {options}; end
+				else
+					options = {};
+				end
+				
+				if ismember('geomean', options)
+					ymeans = 10.^mean(log10(yvals), 1, 'omitnan');
+				else
+					ymeans = mean(yvals, 1, 'omitnan');
+				end
+				
+				if ismember('geostd', options)
+					ystds = geostd(yvals, 0, 1, 'omitnan');
+				else
+					ystds = std(yvals, 0, 1, 'omitnan');
+				end
+				
+				if ismember('relerr', options)
+					[ystdsNeg, ystdsPos] = relError(ymeans, ystds);
+				else
+					ystdsNeg = ystds;
+					ystdsPos = ystds;
+				end
+				
+				if ismember ('unierr', options)
+					% Make errors only show up on the appropriate 'side' of the bar
+					ystdsNeg = ystdsNeg .* (ymeans < 0);
+					ystdsPos = ystdsPos .* (ymeans > 0);
+				end
+				
+				eci = find(strcmpi('edgecolor', barProperties));
+				if ~isempty(eci)
+					errProperties = {'color', barProperties{eci + 1}};
+				else
+					errProperties = {'color', 'k'};
+					barProperties = [barProperties, {'edgecolor', 'k'}];
+				end
+				
+				lci = find(strcmpi('linewidth', barProperties));
+				if ~isempty(lci)
+					errProperties = [errProperties, {'linewidth', barProperties{lci + 1}}];
+				else
+					errProperties = [errProperties, {'linewidth', 1}];
+					barProperties = [barProperties, {'linewidth', 1}];
+				end
+			
+			end
+			
+		end
         
         function [ax, h, cbar] = standardHeatmap(dataMatrix, rowLabels, colLabels, cmap, options)
             % Generates a standard heatmap with fontsize 14 and data arranged nicely
@@ -1624,6 +2323,11 @@ classdef Plotting < handle
 			%	2018-01-15:		Changed extra inputs to options, added colorbar editing
 			%
 			
+			% Check optional inputs exist
+			if ~exist('options', 'var')
+				options = struct();
+			end
+			
             % Invert data rows because stupid heatmap
             flippedData = flipud(dataMatrix);
             
@@ -1679,7 +2383,7 @@ classdef Plotting < handle
 						case {'raw'}
 							cbar = Plotting.biexpColorbar(ax);
 						case {'mef', 'mefl'}
-							cbar = Plotting.biexpColorbarMEF(ax);
+							cbar = Plotting.biexpColorbar(ax, true);
 						otherwise
 							cbar = colorbar('peer', ax, 'EastOutside');
 							cbar.TickDirection = 'out';
@@ -1697,11 +2401,358 @@ classdef Plotting < handle
 		end
 		
 		
+		function ax = heatmap(ax, dataMatrix, edges, labels, cmap, axProperties, options)
+			% Creates a heatmap representing the given data.
+			%
+			%	ax = heatmap(ax, dataMatrix, edges, labels, cmap, axProperties, options)
+			%
+			%	 - 2D data is plotted as a simple heatmap on a single axis
+			%	 - 3D data is plotted as a series of 2D heatmaps stacked in
+			%	   the 3rd dimension on a single axis
+			%
+			%	Inputs
+			%
+			%		ax				<Axes> Handle to the axes to plot onto
+			%
+			%		data			<numeric> A 2-3 dimensional matrix containing
+			%						data to be plotted.
+			%
+			%		edges			<cell> A cell list of numeric arrays containing 
+			%						the edge values for each heatmap element.
+			%						Each element of the cell list corresponds
+			%						with one dimension. 
+			%
+			%		labels			<cell> A cell list of labels for each dimension.
+			%						NOTE: The last entry is the label for the
+			%						colorbar. Thus, # labels = ndims(data) + 1
+			%
+			%		cmap			<numeric, char, ColorMap> (Optional) 
+			%						The colormap to represent data values. 
+			%						 - Can input an Nx3 matrix of RGB values, a
+			%						   ColorMap object pre-initialized with a
+			%						   color, or a string indicating which
+			%						   ColorMap to initialize. 
+			%						 - ColorMap and char inputs will yield 100
+			%						   unique color values on the given scale
+			%						 - Defualt = viridis(100);
+			%
+			%		axProperties	<struct> (Optional) Property-value pairs for
+			%						the axes properties
+			%
+			%		options			<struct> Optional property-value pairs:
+			%							'biexp', <dimensions> enables biexponential 
+			%							  axes in the given dimensions 
+			%								({'C', 'X', 'Y', 'Z'} accepted, where 
+			%								'C' corresponds w/ the colorbar)
+			%							  - Can also pass a struct with the
+			%								dimension names as fields to set the
+			%								MEF scaling factor for axes labels
+			%							'doMEF' If TRUE, does logicle conversion
+			%							  with MEF-unit scaling (1e3)
+			%								(default = FALSE)
+			%							'params': <params> enables setting the
+			%							  logicle function parameters
+			%							  (see Transforms.lin2logicle())
+			%								(defaults to 'standard' values
+			%							'min': <min val> enables setting the
+			%							  lower bound for color-data conversion
+			%								(default = 0)
+			%							'max': <max val> enables setting the
+			%							  upper bound for color-data conversion
+			%								(default = 4.5)
+			%							'fig': <fig handle> enables setting the
+			%							  figure to plot onto
+			%								(default = new fig)
+			%							'categorical': <logical> A flag to plot
+			%							  the axes 'categorically', ie with no
+			%							  tick lines, 90deg rotated x-axis labels,
+			%							  and larger font size
+			%								(default = FALSE)
+			%							'plotColorbar': <logical> A flag to plot
+			%							  the colorbar.
+			%								(default = TRUE)
+			%
+			%	Outputs
+			%
+			%		figBinHmap		<handle> A handle to the generated figure 
+			%
+			% Written By
+			% Ross Jones
+			% jonesr18@mit.edu
+			% Weiss Lab, MIT
+			% 
+			% Update Log:
+			%			
+			
+			doTitle = xCheckInputs_heatmap();
+			
+			for d3 = 1:size(dataMatrix, 3)
+				
+				% Setup patch coordinates
+				patchesX = zeros(4, size(dataMatrix, 1) * size(dataMatrix, 2));
+				patchesY = zeros(size(patchesX));
+				patchesZ = ones(size(patchesX)) * (d3 - 1);
+				patIdx = 0;
+
+				% Adjust for differential edges in higher dims. Linear indexing
+				% ensures that this works no matter how the edges were formatted
+				if iscell(edges{2})
+					currSubsIdx = {d3, options.d4, options.d5};
+					currLinearIdx = sub2ind(options.dataSize(3:end), currSubsIdx{:});
+					e2 = edges{2}{currLinearIdx};
+				else
+					e2 = edges{2};
+				end
+
+				% Extract patch coordinates
+				for d2 = 1:size(dataMatrix, 2)
+
+					% Adjust first dimension for dims 2+
+					if iscell(edges{1})
+						currSubsIdx = {d2, d3, options.d4, options.d5};
+						currLinearIdx = sub2ind(options.dataSize(2:end), currSubsIdx{:});
+						e1 = edges{1}{currLinearIdx};
+					else
+						e1 = edges{1};
+					end
+
+					for d1 = 1:size(dataMatrix, 1)
+
+						patIdx = patIdx + 1;
+
+						patchesX(:, patIdx) = [
+							e1(d1); e1(d1 + 1); e1(d1 + 1); e1(d1)];
+
+						patchesY(:, patIdx) = [
+							e2(d2); e2(d2); e2(d2 + 1); e2(d2 + 1)];
+
+					end
+				end
+
+				% Get colors for each patch
+				colors = Plotting.getColors(dataMatrix(:, :, d3), cmap, options);
+
+				% Plot all patches
+				patch(ax, patchesX, patchesY, patchesZ, ...
+					reshape(colors, [size(patchesX, 2), 1, 3]), ...
+					'EdgeColor', 'none', 'FaceColor', 'flat');
+
+				% Set axes properties/labels
+				% - We do this before setting values on the Z-axis since
+				%	we want any 3rd dim bins to be evenly spaced
+% 						Plotting.biexpAxes(ax, ismember('X', options.biexp), ...
+% 							   ismember('Y', options.biexp), ...
+% 							   ismember('Z', options.biexp), ...
+% 							   options.doMEF, options.params);
+				Plotting.logAxes(ax, options.log, [], options.logParams);
+				Plotting.biexpAxes2(ax, options.biexp, [], options.params);
+				xlabel(ax, labels{1}, 'fontsize', 10);
+				ylabel(ax, labels{2}, 'fontsize', 10);
+			end
+			
+			% Plot Z (3D) labels if applicable
+			if (size(dataMatrix, 3) > 1 && doTitle(3))
+				centers3 = cell(1, size(dataMatrix, 3));
+				for c3i = 1:numel(centers3)
+					if iscell(edges{3}(c3i))
+						centers3{c3i} = edges{3}{c3i};
+					else % Numeric edges
+						if (size(dataMatrix, 3) < numel(edges{3}))
+							edgeVal = mean([edges{3}(c3i), edges{3}(c3i + 1)]);
+						else % Centers given as input
+							edgeVal = edges{3}(c3i);
+						end
+						if edges{3}(c3i) > 1e3
+							% Show large numbers in scientific notation
+							centers3{c3i} = sprintf('%.2g', edgeVal);
+						else
+							centers3{c3i} = num2str(edgeVal);
+						end
+					end
+				end
+				
+				% Need to fix ticks, otherwise they will be 
+				% added/removed as plot size changes
+				ax.ZTick = 0:(size(dataMatrix, 3) - 1); 
+				ax.ZTickLabel = centers3;
+				ax.ZLim = [0, size(dataMatrix, 3) - 1];
+				zlabel(ax, labels{3});
+			end
+			
+			% Standard axes properties
+			if options.categorical
+				set(ax, 'XTickLabelRotation', 90, ...	% Vertical X labels
+						'TickLength', [0, 0], ...		% No ticks
+						'fontsize', 10, ...				% Readable font size
+						'XTick', 0.5:size(dataMatrix, 1), ... % Center the
+						'YTick', 0.5:size(dataMatrix, 2), ... % category labels
+						'XLim', [0, size(dataMatrix, 1)], ... % Sometimes it auto-adjusts wrong
+						'YLim', [0, size(dataMatrix, 2)]);
+			end
+			
+			% Settable properties
+			Plotting.setAxProps(ax, axProperties);
+			
+			% Colormap
+			if options.plotColorbar
+				fO = fieldnames(options.biexp);
+				[~, idxO] = ismember({'c', 'C'}, fO);
+				if any(idxO)
+	% 				cbar = Plotting.biexpColorbar(ax, options.doMEF, options.params);
+					fC = fO{idxO(find(idxO > 0, 1))};
+					cbar = Plotting.biexpColorbar2(ax, options.biexp.(fC), options.params);
+				else
+					cbar = colorbar(ax);
+	% 				cbar.Limits = [min(dataMatrix(:)), max(dataMatrix(:))];
+				end
+				colormap(ax, cmap);
+				cbar.Limits = [options.min, options.max];
+				ax.CLim = cbar.Limits; % Need this or the color won't fill the entire bar
+				cbar.Label.String = labels{end};
+				if isfield(axProperties, 'FontSize')
+					cbar.Label.FontSize = axProperties.FontSize;
+				else
+					cbar.Label.FontSize = 10;
+				end
+			end
+			
+			% --- Helper Functions --- %
+			
+			
+			function doTitle = xCheckInputs_heatmap()
+				
+				% Check axes
+				validateattributes(ax, {'matlab.graphics.axis.Axes'}, {}, mfilename, 'ax', 1);
+				
+				% Check data + dimensions
+				validateattributes(dataMatrix, {'numeric'}, {}, mfilename, 'data', 2);
+				assert(ndims(dataMatrix) > 1, 'Data must have at least two dimensions!')
+				assert(ndims(dataMatrix) < 4, 'Data must have no more than 3 dimensions!')
+				
+				% Determine size of data
+				dataSize = ones(1, 3); % 5 Max allowed number of dimensions
+				dataSizeTemp = size(dataMatrix);
+				dataSize(1:numel(dataSizeTemp)) = dataSizeTemp;
+				
+				% Check edges
+				if isempty(edges)
+					edges = cell(1, ndims(dataMatrix));
+					for di = 1:ndims(dataMatrix)
+						if di <= 2
+							edges{di} = 0:size(dataMatrix, di);
+						else
+							edges{di} = [];
+						end
+					end
+				else
+					validateattributes(edges, {'cell'}, {}, mfilename, 'edges', 3);
+				end
+				assert(numel(edges) == ndims(dataMatrix), ...
+						'Number of set of edges (%d) does not match dimensions of data! (%d)', ...
+						numel(edges), ndims(dataMatrix));
+				doTitle = true(size(edges));
+				for ei = 1:numel(edges)
+					if isempty(edges{ei})
+						doTitle(ei) = false;
+						continue
+					end
+					if ei <= 2
+						if iscell(edges{ei}) % Cell list of edges for each higher dim
+							assert(numel(edges{ei}) == prod(dataSize(ei + 1:end)), ...
+									'Number of dim %d edges variants does not match data', ei);
+							for dei = 1:numel(edges{ei})
+								assert(numel(edges{ei}{dei}) == (size(dataMatrix, ei) + 1), ...
+									'Number of edges supplied for dim %d is incorrect!', ei)
+							end
+						else
+							assert(numel(edges{ei}) == (size(dataMatrix, ei) + 1), ...
+								   'Number of edges supplied for dim %d is incorrect!', ei)
+						end
+					else % Allow specifying exact positions for dims 3+
+						assert(numel(edges{ei}) == size(dataMatrix, ei) || ...
+							   numel(edges{ei}) == (size(dataMatrix, ei) + 1), ...
+							   'Number of edges supplied for dim %d is incorrect!', ei)
+					end
+				end
+				
+				% Check labels
+				validateattributes(labels, {'cell'}, {}, mfilename, 'labels', 4);
+				assert(numel(labels) == (ndims(dataMatrix) + 1), ...
+					'Number of labels (%d) does not match data dimensionality + 1! (%d)', ...
+					numel(labels), ndims(dataMatrix));
+				
+				% Check colormap
+				if exist('cmap', 'var')
+					validateattributes(cmap, {'numeric', 'char', 'ColorMap'}, {}, mfilename, 'cmap', 5);
+					if ischar(cmap)
+						cmap = ColorMap(cmap).getColormap(100);
+					elseif isa(cmap, 'ColorMap')
+						cmap = cmap.getColorMap(100);
+					end
+				else
+					cmap = viridis(100);
+				end
+				
+				% Check axes properties
+				if (exist('axProperties', 'var') && ~isempty(axProperties))
+					validateattributes(axProperties, {'struct'}, {}, mfilename, 'axProperties', 6);
+				else
+					axProperties = struct();
+				end
+				
+				% Check options
+				if exist('options', 'var')
+					validateattributes(options, {'struct'}, {}, mfilename, 'options', 7);
+				else
+					options = struct();
+				end
+				if ~isfield(options, 'log'), options.log = {}; end
+				if ~isfield(options, 'logParams'), options.logParams = {}; end
+				if ~isfield(options, 'biexp'), options.biexp = {}; end
+				if ~isfield(options, 'params'), options.params = struct(); end
+				if ~isfield(options, 'doMEF'), options.doMEF = false; end
+				if options.doMEF, autoscale = 1e3; else, autoscale = 1; end
+				if ~isfield(options, 'min'), options.min = 0; end
+				if ~isfield(options, 'max'), options.max = 4.5; end
+				if ~isfield(options, 'categorical'), options.categorical = false; end
+				if ~isfield(options, 'plotColorbar'), options.plotColorbar = true; end
+				
+				% Options added by Plotting.binHeatmap()
+				if ~isfield(options, 'd4'), options.d4 = 1; end
+				if ~isfield(options, 'd5'), options.d5 = 1; end
+				if ~isfield(options, 'dataSize'), options.dataSize = dataSize; end
+				
+				% Convert biexp/log options to struct if necessary
+				if ischar(options.biexp), options.biexp = {options.biexp}; end
+				if iscell(options.biexp)
+					biexp = struct();
+					for i = 1:numel(options.biexp)
+						try
+							biexp.(options.biexp{i}) = autoscale;
+						catch % in case the fieldname is invalid
+						end
+					end
+					options.biexp = biexp;
+				end
+				if iscell(options.log)
+					logopt = struct();
+					for i = 2:numel(options.log)
+						try % Assume a cell list of axes-limits were passed
+							logopt.(options.log{i - 1}) = options.log{i};
+						catch % in case the fieldname is invalid or otherwise fails
+						end
+					end
+					options.log = logopt;
+				end
+			end
+		end
+		
+		
 		function figBinHmap = binHeatmap(dataMatrix, edges, labels, cmap, axProperties, options)
-			% Creates a heatmap representing the given bin data. The presentation 
+			% Creates a heatmap representing the given data. The presentation 
 			% depends on the dimensionality of the data.
 			%
-			%	figBinHmap = binHeatmap(data, cmap, axProperties)
+			%	figBinHmap = binHeatmap(dataMatrix, edges, labels, cmap, axProperties, options)
 			%
 			%	 - 2D data is plotted as a simple heatmap on a single axis
 			%	 - 3D data is plotted as a series of 2D heatmaps stacked in
@@ -1716,25 +2767,26 @@ classdef Plotting < handle
 			%	Inputs
 			%
 			%		data			<numeric> A 2-5 dimensional matrix containing
-			%						data to be plotted. Each element represents a
-			%						summary statistic from a single bin.
+			%						data to be plotted.
 			%
-			%		edges			<cell> A cell list of numeric arrays
-			%						containing the edge values for each bin.
+			%		edges			<cell> A cell list of numeric arrays containing
+			%						the edge values for each heatmap element.
 			%						Each element of the cell list corresponds
 			%						with one dimension. 
-			%						 - For dimensions 3+, edges can be given as
-			%						   bin center values, which is convenient if
-			%						   the dimension is defined by small molecule 
-			%						   inputs or other non-binning factors.
+			%						 - For dimensions 3+, tick values can be
+			%						   given instead of edges
 			%						 - Edges for dimensions 3+ can also be
 			%						   categorical, given as a cell list of
 			%						   strings with length equal to size(data, N)
+			%						 - If the contents of one array element is
+			%						   itself a cell list (which must be the
+			%						   same size as dimensions 3+), then each
+			%						   element will be used independently for
+			%						   each higher-dimensional heatmap. 
 			%
 			%		labels			<cell> A cell list of labels for each dimension.
 			%						NOTE: The last entry is the label for the
-			%						bin statistic being plotted! 
-			%						Thus, # labels = ndims(data) + 1
+			%						colorbar. Thus, # labels = ndims(data) + 1
 			%
 			%		cmap			<numeric, char, ColorMap> (Optional) 
 			%						The colormap to represent data values. 
@@ -1744,7 +2796,7 @@ classdef Plotting < handle
 			%						   ColorMap to initialize. 
 			%						 - ColorMap and char inputs will yield 100
 			%						   unique color values on the given scale
-			%						 - Defualt = parula(100);
+			%						 - Defualt = viridis(100);
 			%
 			%		axProperties	<struct> (Optional) Property-value pairs for
 			%						the axes properties for each axes object
@@ -1755,25 +2807,37 @@ classdef Plotting < handle
 			%							  axes in the given dimensions 
 			%								({'C', 'X', 'Y', 'Z'} accepted, where 
 			%								'C' corresponds w/ the colorbar)
+			%							  - Can also pass a struct with the
+			%								dimension names as fields to set the
+			%								MEF scaling factor for axes labels
 			%							'doMEF' If TRUE, does logicle conversion
 			%							  with MEF-unit scaling
 			%								(default = FALSE)
 			%							'params': <params> enables setting the
 			%							  logicle function parameters
 			%							  (see Transforms.lin2logicle())
-			%							'min', <min val> enables setting the
+			%								(defaults to 'standard' values)
+			%							'min': <min val> enables setting the
 			%							  lower bound for color-data conversion
 			%								(default = 0)
-			%							'max', <max val> enables setting the
+			%							'max': <max val> enables setting the
 			%							  upper bound for color-data conversion
 			%								(default = 4.5)
 			%							'fig', <fig handle> enables setting the
 			%							  figure to plot onto
 			%								(defualt = new fig)
+			%							'categorical': <logical> A flag to plot
+			%							  the axes 'categorically', ie with no
+			%							  tick lines, 90deg rotated x-axis labels,
+			%							  and larger font size
+			%								(default = FALSE)
+			%							'plotColorbar': <logical> A flag to plot
+			%							  the colorbar.
+			%								(default = TRUE)
 			%
 			%	Outputs
 			%
-			%		figBinHmap		<handle> A handle to the generated figure 
+			%		figBinHmap		<Figure> A handle to the generated figure 
 			%
 			% Written By
 			% Ross Jones
@@ -1784,6 +2848,11 @@ classdef Plotting < handle
 			%
 			%	2018-03-06		Added option for giving figure handle to plot on
 			
+			% TODO: 
+			%	1) Make it so N or N+1 edges can be used for D1-2 as well 
+			%		(automatically treat as categorical if so)
+			%	2) Rename to batchHeatmap or something like that
+			
 			[figBinHmap, doTitle] = zCheckInputs_binHeatmap();
 			
 			spIdx = 0;
@@ -1793,86 +2862,22 @@ classdef Plotting < handle
 					spIdx = spIdx + 1;
 					ax = subplot(size(dataMatrix, 5), size(dataMatrix, 4), spIdx);
 					
-					for d3 = 1:size(dataMatrix, 3)
-						
-						% Setup patch coordinates
-						patchesX = zeros(4, size(dataMatrix, 1) * size(dataMatrix, 2));
-						patchesY = zeros(size(patchesX));
-						patchesZ = ones(size(patchesX)) * (d3 - 1);
-						patIdx = 0;
-						
-						% Extract patch coordinates
-						for d2 = 1:size(dataMatrix, 2)
-							for d1 = 1:size(dataMatrix, 1)
-								
-								patIdx = patIdx + 1;
-								
-								patchesX(:, patIdx) = [
-									edges{1}(d1)
-									edges{1}(d1 + 1)
-									edges{1}(d1 + 1)
-									edges{1}(d1)];
-								
-								patchesY(:, patIdx) = [
-									edges{2}(d2)
-									edges{2}(d2)
-									edges{2}(d2 + 1)
-									edges{2}(d2 + 1)];
-								
-							end
-						end
-						
-						% Get colors for each patch
-						colors = Plotting.getColors(dataMatrix(:, :, d3, d4, d5), cmap, options);
-						
-						% Plot all patches
-						patch(ax, patchesX, patchesY, patchesZ, ...
-							reshape(colors, [size(patchesX, 2), 1, 3]), ...
-							'EdgeColor', 'none', 'FaceColor', 'flat');
-						
-						% Set axes properties/labels
-						% - We do this before setting values on the Z-axis since
-						%	we want any 3rd dim bins to be evenly spaced
-						Plotting.biexpAxes(ax, ismember('X', options.biexp), ...
-							   ismember('Y', options.biexp), ...
-							   ismember('Z', options.biexp), ...
-							   options.doMEF, options.logicle)
-						set(ax, axProperties);
-						xlabel(ax, labels{1});
-						ylabel(ax, labels{2});
+					if (size(dataMatrix, 3) == 1)
+						elSubs = [1, 2];
+					else
+						elSubs = [1, 2, 3];
 					end
 					
-					% Plot Z (3D) labels if applicable
-					if (size(dataMatrix, 3) > 1 && doTitle(3))
-						centers3 = cell(1, size(dataMatrix, 3));
-						for c3i = 1:numel(centers3)
-							if iscell(edges{3}(c3i))
-								centers3{c3i} = edges{3}{c3i};
-							else
-								if (size(dataMatrix, 3) < numel(edges{3}))
-									edgeVal = mean([edges{3}(c3i), edges{3}(c3i + 1)]);
-								else
-									edgeVal = edges{3}(c3i);
-								end
-								if edges{3}(c3i) > 1e3
-									% Show large numbers in scientific notation
-									centers3{c3i} = sprintf('%.2g', edgeVal);
-								else
-									centers3{c3i} = num2str(edgeVal);
-								end
-							end
-						end
-						
-						% Need to fix ticks, otherwise they will be 
-						% added/removed as plot size changes
-						ax.ZTick = 0:(size(dataMatrix, 3) - 1); 
-						ax.ZTickLabel = centers3;
-						zlabel(ax, labels{3});
-					end
+					optionsHM = options;
+					optionsHM.d4 = d4; optionsHM.d5 = d5;
+					optionsHM.plotColorbar = false;
+					ax = Plotting.heatmap(ax, dataMatrix(:, :, :, d4, d5), ...
+							edges(elSubs), labels([elSubs, numel(labels)]), ...
+							cmap, axProperties, optionsHM);
 					
 					% Plot titles w/ 4/5D labels if applicable
 					titleTxt = {};
-					if (size(dataMatrix, 4) > 1 && doTitle(5))
+					if (size(dataMatrix, 4) > 1 && doTitle(4))
 						if iscell(edges{4}(d4))
 							center4 = edges{4}{d4};
 						else
@@ -1909,18 +2914,45 @@ classdef Plotting < handle
 						titleTxt = [titleTxt; {sprintf('%s = %s', labels{5}, center5)}]; %#ok<AGROW>
 					end
 					title(ax, titleTxt);
+					
+% 					% Standard axes properties
+% 					if options.categorical
+% 						set(ax, 'XTickLabelRotation', 90, ...	% Vertical X labels
+% 								'TickLength', [0, 0], ...		% No ticks	
+% 								'fontsize', 10, ...				% Readable font size
+% 								'XTick', 0.5:size(dataMatrix, 1), ... % Center the
+% 								'YTick', 0.5:size(dataMatrix, 2), ... % category labels
+% 								'XLim', [0, size(dataMatrix, 1)], ... % Sometimes it auto-adjusts wrong
+% 								'YLim', [0, size(dataMatrix, 2)]);
+% 					end
+% 					
+% 					% Settable properties
+% 					Plotting.setAxProps(ax, axProperties);
 				end
 			end
 			
-			if ismember('C', options.biexp)
-				cbar = Plotting.biexpColorbar(ax, options.doMEF, options.logicle);
-			else
-				cbar = colorbar(ax);
-				cbar.Limits = [min(dataMatrix(:)), max(dataMatrix(:))];
-			end
-			cbar.Label.String = labels{end};
-			if isfield(axProperties, 'FontSize')
-				cbar.Label.FontSize = axProperties.FontSize;
+			if options.plotColorbar
+				fO = fieldnames(options.biexp);
+				[~, idxO] = ismember({'c', 'C'}, fO);
+				if any(idxO)
+	% 				cbar = Plotting.biexpColorbar(ax, options.doMEF, options.params);
+					fC = fO{idxO(find(idxO > 0, 1))};
+					cbar = Plotting.biexpColorbar2(ax, options.biexp.(fC), options.params);
+				else
+					cbar = colorbar(ax);
+	% 				cbar.Limits = [min(dataMatrix(:)), max(dataMatrix(:))];
+				end
+				colormap(ax, cmap);
+				cbar.Limits = [options.min, options.max];
+				cbar.FontSize = ax.FontSize;
+				ax.CLim = cbar.Limits; % Need this or the color won't fill the entire bar
+				cbar.Label.String = labels{end};
+				cbar.Label.FontSize = ax.XLabel.FontSize;
+				if isfield(axProperties, 'FontSize')
+					cbar.Label.FontSize = axProperties.FontSize;
+				else
+					cbar.Label.FontSize = 10;
+				end
 			end
 			
 			
@@ -1934,10 +2966,26 @@ classdef Plotting < handle
 				assert(ndims(dataMatrix) > 1, 'Data must have at least two dimensions!')
 				assert(ndims(dataMatrix) < 6, 'Data must have no more than 5 dimensions!')
 				
+				% Determine size of data
+				dataSize = ones(1, 5); % 5 Max allowed number of dimensions
+				dataSizeTemp = size(dataMatrix);
+				dataSize(1:numel(dataSizeTemp)) = dataSizeTemp;
+				
 				% Check edges
-				validateattributes(edges, {'cell'}, {}, mfilename, 'edges', 2);
+				if isempty(edges)
+					edges = cell(1, ndims(dataMatrix));
+					for di = 1:ndims(dataMatrix)
+						if di <= 2
+							edges{di} = 0:size(dataMatrix, di);
+						else
+							edges{di} = [];
+						end
+					end
+				else
+					validateattributes(edges, {'cell'}, {}, mfilename, 'edges', 2);
+				end
 				assert(numel(edges) == ndims(dataMatrix), ...
-						'Number of edges (%d) does not match data dimensionality! (%d)', ...
+						'Number of set of edges (%d) does not match dimensions of data! (%d)', ...
 						numel(edges), ndims(dataMatrix));
 				doTitle = true(size(edges));
 				for ei = 1:numel(edges)
@@ -1946,8 +2994,17 @@ classdef Plotting < handle
 						continue
 					end
 					if ei <= 2
-						assert(numel(edges{ei}) == (size(dataMatrix, ei) + 1), ...
-							   'Number of edges supplied for dim %d is incorrect!', ei)
+						if iscell(edges{ei}) % Cell list of edges for each higher dim
+							assert(numel(edges{ei}) == prod(dataSize(ei + 1:end)), ...
+									'Number of dim %d edges variants does not match data', ei);
+							for dei = 1:numel(edges{ei})
+								assert(numel(edges{ei}{dei}) == (size(dataMatrix, ei) + 1), ...
+									'Number of edges supplied for dim %d is incorrect!', ei)
+							end
+						else
+							assert(numel(edges{ei}) == (size(dataMatrix, ei) + 1), ...
+								   'Number of edges supplied for dim %d is incorrect!', ei)
+						end
 					else % Allow specifying exact positions for dims 3+
 						assert(numel(edges{ei}) == size(dataMatrix, ei) || ...
 							   numel(edges{ei}) == (size(dataMatrix, ei) + 1), ...
@@ -1965,12 +3022,17 @@ classdef Plotting < handle
 				if exist('cmap', 'var')
 					validateattributes(cmap, {'numeric', 'char', 'ColorMap'}, ...
 							{}, mfilename, 'cmap', 4);
+					if ischar(cmap)
+						cmap = ColorMap(cmap).getColormap(100);
+					elseif isa(cmap, 'ColorMap')
+						cmap = cmap.getColorMap(100);
+					end
 				else
-					cmap = parula(100);
+					cmap = viridis(100);
 				end
 				
 				% Check axes properties
-				if exist('axProperties', 'var')
+				if (exist('axProperties', 'var') && ~isempty(axProperties))
 					validateattributes(axProperties, {'struct'}, {}, mfilename, 'axProperties', 5);
 				else
 					axProperties = struct();
@@ -1978,22 +3040,50 @@ classdef Plotting < handle
 				
 				% Check options
 				if exist('options', 'var')
-					validateattributes(options, {'struct'}, {}, mfilename, 'options', 6);
+					validateattributes(options, {'struct'}, {}, mfilename, 'options', 7);
 				else
 					options = struct();
 				end
+				if ~isfield(options, 'log'), options.log = {}; end
+				if ~isfield(options, 'logParams'), options.logParams = {}; end
 				if ~isfield(options, 'biexp'), options.biexp = {}; end
-				if ~isfield(options, 'logicle'), options.logicle = struct(); end
+				if ~isfield(options, 'params'), options.params = struct(); end
 				if ~isfield(options, 'doMEF'), options.doMEF = false; end
+				if options.doMEF, autoscale = 1e3; else, autoscale = 1; end
 				if ~isfield(options, 'min'), options.min = 0; end
 				if ~isfield(options, 'max'), options.max = 4.5; end
-				if isfield(options, 'fig')
-					figBinHmap = options.fig; 
-				else
+				if ~isfield(options, 'categorical'), options.categorical = false; end
+				if ~isfield(options, 'plotColorbar'), options.plotColorbar = true; end
+				if ~isfield(options, 'fig')
 					figBinHmap = figure();
+				else
+					figBinHmap = options.fig;
+				end
+				options.dataSize = dataSize;
+				
+				% Convert biexp/log options to struct if necessary
+				if ischar(options.biexp), options.biexp = {options.biexp}; end
+				if iscell(options.biexp)
+					biexp = struct();
+					for i = 1:numel(options.biexp)
+						try
+							biexp.(options.biexp{i}) = autoscale;
+						catch % in case the fieldname is invalid
+						end
+					end
+					options.biexp = biexp;
+				end
+				if iscell(options.log)
+					logopt = struct();
+					for i = 2:numel(options.log)
+						try % Assume a cell list of axes-limits were passed
+							logopt.(options.log{i - 1}) = options.log{i};
+						catch % in case the fieldname is invalid or otherwise fails
+						end
+					end
+					options.log = logopt;
 				end
 			end
-			
 		end
 		
 		
